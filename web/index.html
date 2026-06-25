@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>p2pfs — coffre chiffré</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ====================== ÉCRAN DE CONNEXION ====================== -->
+<div id="auth" class="auth-screen">
+  <div class="auth-card">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V5l-8-3Z"/><path d="M9.5 12.5l1.8 1.8 3.4-3.6" class="check"/></svg>
+      <span>p2pfs</span>
+    </div>
+    <h1>Ouvrez votre coffre</h1>
+    <p class="sub">Vos 12 mots sont la seule clé du coffre. Ils restent dans ce navigateur
+      et ne sont jamais envoyés au serveur. Perdus, vos fichiers sont irrécupérables.</p>
+    <textarea id="seed" rows="3" spellcheck="false" autocomplete="off"
+      placeholder="saisissez vos douze mots, séparés par des espaces"></textarea>
+    <div class="auth-actions">
+      <button id="gen" class="btn btn-ghost">Générer une clé</button>
+      <button id="connect" class="btn btn-primary">Ouvrir le coffre</button>
+    </div>
+    <div id="key-unlock-wrap" class="hidden">
+      <div class="auth-or"><span>ou</span></div>
+      <button id="unlock-key" class="btn btn-ghost auth-key-btn">
+        <svg viewBox="0 0 24 24" class="ic"><circle cx="8" cy="15" r="5"/><path d="M11.5 11.5 21 2M18 5l2 2M15 8l2 2"/></svg>
+        Déverrouiller avec une clé de sécurité
+      </button>
+    </div>
+    <p id="auth-status" class="auth-status"></p>
+  </div>
+  <p class="auth-foot">Chiffrement de bout en bout · Ed25519 + AES‑256‑GCM · le serveur ne voit que du ciphertext</p>
+</div>
+
+<!-- ====================== APPLICATION ====================== -->
+<div id="app" class="app hidden">
+
+  <!-- Fond semi-opaque du tiroir latéral (mobile) -->
+  <div id="sidebar-backdrop"></div>
+
+  <!-- Barre latérale -->
+  <aside class="sidebar">
+    <div class="side-brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V5l-8-3Z"/><path d="M9.5 12.5l1.8 1.8 3.4-3.6" class="check"/></svg>
+      <span>p2pfs</span>
+    </div>
+
+    <div class="new-wrap">
+      <button id="new-btn" class="btn btn-primary new-btn">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>
+        Nouveau
+      </button>
+      <div id="new-menu" class="menu hidden">
+        <button data-act="import"><svg viewBox="0 0 24 24" class="ic"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>Importer des fichiers</button>
+        <button data-act="folder"><svg viewBox="0 0 24 24" class="ic"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M12 11v4M10 13h4"/></svg>Nouveau dossier</button>
+      </div>
+    </div>
+
+    <nav class="side-nav">
+      <button class="nav-item active" data-view-nav="files">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>
+        Mes fichiers
+      </button>
+      <button class="nav-item" data-view-nav="recent">
+        <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        Récents
+      </button>
+    </nav>
+
+    <div class="side-bottom">
+      <div class="vault-meter">
+        <div class="vm-head"><span>Coffre</span><span id="vm-size">0 o</span></div>
+        <div class="vm-bar"><div id="vm-fill" class="vm-fill"></div></div>
+        <div class="vm-files"><span id="vm-count">0 fichier</span></div>
+      </div>
+      <div class="identity">
+        <svg viewBox="0 0 24 24" class="ic key"><circle cx="8" cy="15" r="5"/><path d="M11.5 11.5 21 2M18 5l2 2M15 8l2 2"/></svg>
+        <div>
+          <div class="id-label">Identité du coffre</div>
+          <code id="fingerprint">—</code>
+        </div>
+      </div>
+      <button id="enroll-key" class="btn btn-ghost lock-btn hidden">
+        <svg viewBox="0 0 24 24" class="ic"><circle cx="8" cy="15" r="5"/><path d="M11.5 11.5 21 2M18 5l2 2M15 8l2 2"/></svg>
+        Ajouter une clé de sécurité
+      </button>
+      <button id="lock" class="btn btn-ghost lock-btn">
+        <svg viewBox="0 0 24 24" class="ic"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        Verrouiller
+      </button>
+    </div>
+  </aside>
+
+  <!-- Zone principale -->
+  <main class="content">
+    <header class="topbar">
+      <button id="menu-btn" class="icon-btn menu-btn" aria-label="Ouvrir le menu">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <nav id="crumbs" class="crumbs" aria-label="Fil d'Ariane"></nav>
+      <div class="top-tools">
+        <div class="search">
+          <svg viewBox="0 0 24 24" class="ic"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="search" type="search" placeholder="Rechercher dans le coffre" autocomplete="off">
+        </div>
+        <div class="view-toggle">
+          <button id="view-grid" class="vt active" title="Grille"><svg viewBox="0 0 24 24" class="ic"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
+          <button id="view-list" class="vt" title="Liste"><svg viewBox="0 0 24 24" class="ic"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
+        </div>
+      </div>
+    </header>
+
+    <section id="canvas" class="canvas">
+      <div id="empty" class="empty hidden"></div>
+      <div id="grid" class="grid"></div>
+      <table id="list" class="list hidden">
+        <thead><tr><th class="c-name">Nom</th><th class="c-size">Taille</th><th class="c-date">Ajouté</th><th class="c-act"></th></tr></thead>
+        <tbody id="list-body"></tbody>
+      </table>
+    </section>
+
+    <!-- Overlay glisser-déposer -->
+    <div id="drop-overlay" class="drop-overlay hidden">
+      <div class="drop-inner">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 20h14"/></svg>
+        <p>Déposez pour chiffrer et importer ici</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<input id="file" type="file" multiple hidden>
+
+<!-- Modale générique (saisie de texte) -->
+<div id="modal" class="modal-back hidden">
+  <div class="modal">
+    <h3 id="modal-title"></h3>
+    <input id="modal-input" type="text" autocomplete="off">
+    <p id="modal-error" class="modal-error"></p>
+    <div class="modal-actions">
+      <button id="modal-cancel" class="btn btn-ghost">Annuler</button>
+      <button id="modal-ok" class="btn btn-primary">Valider</button>
+    </div>
+  </div>
+</div>
+
+<!-- Encart d'accueil : proposer d'enrôler une clé de sécurité (1ʳᵉ ouverture) -->
+<div id="key-modal" class="modal-back hidden">
+  <div class="modal">
+    <h3>Protégez ce coffre avec une clé de sécurité</h3>
+    <p class="modal-text">Ajoutez une <strong>clé de sécurité</strong>, une passkey ou Touch ID /
+      Windows Hello : vous ouvrirez ensuite ce coffre <strong>sans saisir votre seed</strong>,
+      à l'abri d'un keylogger. Vos 12 mots restent votre récupération hors ligne.</p>
+    <div class="modal-actions">
+      <button id="key-later" class="btn btn-ghost">Plus tard</button>
+      <button id="key-now" class="btn btn-primary">Ajouter une clé maintenant</button>
+    </div>
+  </div>
+</div>
+
+<!-- Conteneur de notifications -->
+<div id="toasts" class="toasts"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

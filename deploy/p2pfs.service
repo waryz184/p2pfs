@@ -1,0 +1,73 @@
+# =============================================================================
+# p2pfs.service — exécution durcie via le sandboxing systemd (gratuit, natif).
+# Installer dans /etc/systemd/system/p2pfs.service
+#
+#   systemctl daemon-reload
+#   systemctl enable --now p2pfs
+#   systemctl status p2pfs
+#   journalctl -u p2pfs -f
+#
+# Vérifier le niveau de durcissement obtenu :  systemd-analyze security p2pfs
+# =============================================================================
+
+[Unit]
+Description=p2pfs - serveur de stockage chiffré zero-knowledge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/p2pfs -addr 127.0.0.1:8000 -data /var/lib/p2pfs
+Restart=on-failure
+RestartSec=2
+
+# --- Identité : utilisateur éphémère, aucun compte à gérer ------------------
+DynamicUser=yes
+StateDirectory=p2pfs
+StateDirectoryMode=0700
+
+# --- Sandboxing filesystem --------------------------------------------------
+# ProtectSystem=strict : tout / en lecture seule, sauf StateDirectory (auto en RW)
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- Privilèges & syscalls --------------------------------------------------
+NoNewPrivileges=yes
+CapabilityBoundingSet=          # aucune capability
+AmbientCapabilities=
+LockPersonality=yes
+# MemoryDenyWriteExecute : pas de pages W+X (anti-shellcode)
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io
+
+# --- Réseau : uniquement IPv4/IPv6/UNIX, écoute loopback --------------------
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# IMPORTANT : une allow-list n'a d'effet QUE couplée à un deny. Sans
+# IPAddressDeny=any, IPAddressAllow était un no-op (F6). On refuse tout, puis on
+# n'autorise que la loopback (le binaire écoute sur 127.0.0.1, le public passe
+# par Caddy qui tourne dans un autre service).
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# --- Ressources (anti-DoS local) --------------------------------------------
+LimitNOFILE=65536
+MemoryMax=512M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
