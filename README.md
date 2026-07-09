@@ -6,8 +6,8 @@ toute la cryptographie se passe **dans le navigateur**. Le serveur ne stocke que
 octets opaques : il ne peut lire ni le contenu, ni les noms de fichiers, même si on le
 compromet entièrement.
 
-> POC testé : **15/15** tests crypto + **18/18** tests d'intégration HTTP, et opacité
-> serveur démontrée (aucune donnée en clair sur disque). Voir `TESTS` plus bas.
+> POC testé de bout en bout (Go + Node, unitaire + e2e contre le vrai binaire), et opacité
+> serveur démontrée (aucune donnée en clair sur disque). Détail et commandes : `TESTS` plus bas.
 
 ---
 
@@ -48,14 +48,8 @@ le contenu, les noms en clair.
 | **Chiffrement fichiers** | **AES-256-GCM**, DEK par fichier enveloppée par la KEK | GCM = chiffrement authentifié (intègre + confidentiel). Une DEK par fichier limite l'impact d'une fuite et permet le partage futur. |
 | **Stockage blobs** | Fichiers sur disque, **adressés par contenu** (sha256) | Déduplication gratuite, intégrité vérifiable, pas de base lourde. |
 | **Métadonnées** | **SQLite** (prod) / JSON (POC) | Un seul fichier, pas de serveur DB à sécuriser/patcher. |
-| **TLS / exposition** | **Caddy** | Let's Encrypt automatique, renouvellement auto, config 3 lignes, robuste. |
-| **Exécution** | **systemd** sandboxé (ou Docker `scratch`) | Sandboxing noyau gratuit (`ProtectSystem`, `NoNewPrivileges`, seccomp…). |
-| **Durcissement VPS** | `harden.sh` idempotent | SSH clés-only, UFW deny-par-défaut, fail2ban, sysctl, MAJ auto. |
-
-**Pourquoi pas Docker par défaut ?** Pour un service auto-suffisant, systemd offre un
-sandboxing aussi fort sans ajouter le daemon Docker (et son contournement classique d'UFW
-via la chaîne `DOCKER` iptables) à la surface d'attaque. Le `Dockerfile` `scratch` reste
-fourni si tu préfères la repro conteneurisée.
+| **TLS / exposition** | **Caddy** (public) ou **Tailscale** (privé) | Caddy : Let's Encrypt automatique. Tailscale : certificat `*.ts.net` auto, zéro port public — voir §6. |
+| **Exécution** | **Docker**, image `scratch` | Binaire statique + WebUI embarquées, pas de shell/libc dans l'image, utilisateur non-root (`10001:10001`). |
 
 ---
 
@@ -110,9 +104,9 @@ seed rouvre toujours le même coffre depuis n'importe quel navigateur.
 | **Réordonnancement / troncature / permutation de champs par le serveur** | Chaque opération GCM est **liée à son contexte par AAD** : les morceaux à `(fileID, index, total)`, le nom et la DEK enveloppée au `fileID`. Un serveur qui réordonne/tronque le manifeste, ou associe le nom du fichier A au contenu de B, fait **échouer le déchiffrement**. **Démontré** (tests crypto + e2e). |
 | **DoS basique** | Limites de taille (corps, blobs 64 MiB, headers), timeouts HTTP, `MemoryMax`/`TasksMax`. Blobs lus/écrits **en flux** (pas de chargement intégral en RAM). **Quotas** par compte + plafond global (anti remplissage disque). Rate-limit indexé sur une **IP non falsifiable**. |
 | **Injection JS / vol de seed via XSS** | **CSP stricte** (`default-src 'none'`, `script-src 'self'`, `connect-src 'self'`), token en mémoire volatile (pas de `localStorage`), no inline script/style. |
-| **Capture de la seed à la saisie (keylogger)** | **Déverrouillage par clé matérielle** (WebAuthn/PRF) : aucune saisie de la seed au quotidien, secret dérivé dans le matériel, présence physique requise. La seed reste la récupération hors-ligne. Voir §6 bis. |
+| **Capture de la seed à la saisie (keylogger)** | **Déverrouillage par clé matérielle** (WebAuthn/PRF) : aucune saisie de la seed au quotidien, secret dérivé dans le matériel, présence physique requise. La seed reste la récupération hors-ligne. Voir §7. |
 | **MITM réseau** | TLS obligatoire (WebCrypto exige un secure context), HSTS. |
-| **Attaques niveau OS** | `harden.sh` + sandboxing systemd (seccomp, no-new-privs, FS read-only, capabilities vidées). |
+| **Attaques niveau OS** | Image `scratch` (pas de shell/libc/paquet à exploiter), utilisateur non-root, aucun port public en déploiement Tailscale (§6, option C). |
 
 ### Limites assumées du POC (à connaître)
 - **Tu sers toi-même le code crypto.** Un serveur compromis pourrait servir un JS
@@ -158,33 +152,18 @@ CGO_ENABLED=0 go build -ldflags "-s -w" -o p2pfs ./cmd/p2pfs
 
 ## 6. Déployer en production
 
-### Option A — systemd (recommandée)
-```bash
-# sur ta machine : build
-CGO_ENABLED=0 go build -ldflags "-s -w" -o p2pfs ./cmd/p2pfs
-scp -r p2pfs deploy/ root@VPS:/root/p2pfs/
+p2pfs est conçu pour tourner en conteneur Docker (image `scratch`, voir `Dockerfile`).
+Trois façons de le lancer, de la plus manuelle à la plus intégrée :
 
-# sur le VPS : durcissement + install (idempotent)
-cd /root/p2pfs
-sudo DOMAIN=vault.tondomaine.fr ADMIN_USER=deploy SSH_PORT=22 ./deploy/harden.sh
-
-# vérifs
-systemd-analyze security p2pfs     # vise un score "OK"/exposure faible
-ufw status verbose
-curl -I https://vault.tondomaine.fr
-```
-`harden.sh` installe le binaire, l'unit systemd sandboxée, Caddy (TLS auto), configure
-SSH/UFW/fail2ban/sysctl et les MAJ de sécurité automatiques.
-
-### Option B — Docker
+### Option A — Docker (manuel)
 ```bash
 docker build -t p2pfs:latest .
 docker run -d --name vault --restart=unless-stopped \
   -p 127.0.0.1:8000:8000 -v p2pfsdata:/data p2pfs:latest
-# Caddy (sur l'hôte) reverse-proxy 127.0.0.1:8000 et gère le TLS.
+# Caddy (ou tout reverse-proxy sur l'hôte) termine le TLS devant 127.0.0.1:8000.
 ```
 
-### Option C — Docker Compose (p2pfs + Caddy conteneurisés)
+### Option B — Docker Compose + Caddy (exposition publique)
 ```bash
 cp .env.example .env        # renseigner DOMAIN=vault.tondomaine.fr (jamais une IP)
 docker compose up -d --build
@@ -197,7 +176,7 @@ dans le volume nommé `p2pfs_data`. Le port d'écoute interne de p2pfs (`P2PFS_P
 dans `.env`, défaut `8000`) est une variable — inutile d'y toucher sauf conflit
 avec un autre service sur le même réseau Docker.
 
-### Option D — Docker Compose + Tailscale (aucune exposition publique)
+### Option C — Docker Compose + Tailscale (aucune exposition publique, recommandée)
 Si le serveur tourne déjà `tailscale` (hôte) et que le coffre n'a besoin d'être
 accessible que depuis tes propres appareils, pas besoin de Caddy/Let's Encrypt :
 Tailscale fournit déjà du TLS valide via son certificat `*.ts.net`.
@@ -217,7 +196,7 @@ commande hôte, pas un conteneur).
 
 ---
 
-## 6 bis. Déverrouillage par clé matérielle (WebAuthn/PRF)
+## 7. Déverrouillage par clé matérielle (WebAuthn/PRF)
 
 En plus de la seed phrase, un coffre peut être déverrouillé par une **clé de sécurité,
 une passkey ou Touch ID / Windows Hello**, via WebAuthn et l'extension **PRF**
@@ -264,36 +243,7 @@ même identité seed↔clé) est lui prouvé hors navigateur : `node tests/unloc
 
 ---
 
-## 6 ter. Déploiement sur GCP Compute Engine
-
-**Guide complet et commandes `gcloud` : [`deploy/gcp.md`](deploy/gcp.md).** En bref, l'archi
-(Caddy TLS + p2pfs loopback) convient telle quelle ; les risques prod sur GCP sont
-**opérationnels**, pas cryptographiques. Points qui bloquent ou risquent vraiment :
-
-1. **Domaine obligatoire, jamais l'IP.** WebAuthn et WebCrypto exigent un *secure context* +
-   un **RP ID = domaine enregistrable** (`vault.exemple.fr`). Servir via l'IP publique GCP
-   **désactive WebAuthn/WebCrypto**. Le **RP ID est immuable** : changer de domaine invalide
-   toutes les passkeys enrôlées → fixe le domaine **avant** d'enrôler des clés. IP statique.
-2. **Pare-feu VPC (la vraie frontière), pas seulement UFW** : règles d'ingress `tcp:80,443`
-   (0.0.0.0/0), `tcp:22` depuis ton IP, et **jamais le port 8000**.
-3. **Disque chiffré + sauvegardes** : un coffre zero-knowledge perdu est **irrécupérable**
-   (la seed n'est pas chez toi). Données sur un **disque persistant dédié**, **snapshots
-   chiffrés planifiés**, et `deploy/backup.sh` (tar cohérent + GCS optionnel) — **teste la
-   restauration**.
-4. **`-trusted-proxies` (F2)** : Caddy-sur-VM → défaut loopback correct, rien à changer. Si tu
-   ajoutes un **GCP HTTPS LB / Cloud Armor**, déclare les plages Google Front End
-   (`130.211.0.0/22,35.191.0.0/16`) sinon le rate-limit s'effondre.
-5. **Mono-instance** : sessions et rate-limit sont en mémoire → **pas d'autoscaling/MIG**.
-
-> **Durcissement prod déjà intégré** : `flush()` est **durable** (fsync fichier+répertoire),
-> `p2pfs` s'arrête **proprement** sur SIGTERM (drain des uploads — chaque `systemctl restart`
-> / maintenance GCE), il **refuse de démarrer** si l'index est corrompu (au lieu d'écraser des
-> données), et nettoie les fichiers d'upload interrompus au boot. Le modèle de menace ne change
-> pas sur GCP : Google opère l'hyperviseur, mais tout est chiffré côté client.
-
----
-
-## 7. Passage en prod : SQLite + BLAKE3
+## 8. Passage en prod : SQLite + BLAKE3
 
 Le store est derrière l'interface `Store` (`internal/server/store.go`). Pour la prod :
 
@@ -315,7 +265,7 @@ Le store est derrière l'interface `Store` (`internal/server/store.go`). Pour la
 
 ---
 
-## 8. Interface — gestionnaire de fichiers
+## 9. Interface — gestionnaire de fichiers
 
 La WebUI reprend les codes de Google Drive / Nextcloud : barre latérale (en **tiroir**
 sur mobile), bouton **Nouveau** (importer / créer un dossier), vues **grille** et **liste**,
@@ -339,38 +289,39 @@ collisions de nom et interdit de placer un dossier dans lui-même ou un de ses s
 > vides, renommage, **déplacement fichier+dossier avec intégrité du contenu** (`e2e-move.test.mjs`,
 > 6/6), et **aucun chemin en clair côté serveur**.
 
-## 9. Arborescence
+## 10. Arborescence
 ```
 p2pfs/
 ├── go.mod
 ├── assets.go                  # //go:embed all:web  (WebUI dans le binaire)
-├── cmd/p2pfs/main.go         # point d'entrée
+├── cmd/p2pfs/main.go          # point d'entrée (flags -addr/-data/-trusted-proxies/-max-*)
 ├── internal/server/
-│   ├── server.go              # routing, handlers, CSP, rate-limit, clientIP durci, graceful shutdown
-│   ├── auth.go                # Ed25519 challenge-réponse, sessions (+révocation), rate-limiter
-│   ├── store.go               # Store + JSON store (flush durable/fsync) + BlobStore (flux, quota, GC)
-│   ├── server_test.go         # tests Go (F2/F3/F4/F5/F9/F10 + unlock + isolation)
-│   └── store_test.go          # tests durabilité (fail-closed index corrompu, nettoyage .tmp)
-├── tests/                     # tests Node hors-bundle (NON embarqués/servis)
-│   ├── crypto.test.mjs        # tests crypto (liaison AAD, anti reorder/troncature/splice)
-│   └── unlock.test.mjs        # tests du cœur crypto de déverrouillage (PRF simulée)
-├── e2e.test.mjs               # e2e (Node ↔ binaire) : flux fichiers
-├── e2e-unlock.test.mjs        # e2e : déverrouillage par clé matérielle
-├── e2e-move.test.mjs          # e2e : déplacement fichier/dossier
-├── web/                       # WebUI (servie embarquée — plus aucun fichier de test)
-│   ├── index.html             # aucun script/style inline (CSP-compatible)
+│   ├── server.go               # routing, handlers, CSP, rate-limit, clientIP durci, graceful shutdown
+│   ├── auth.go                 # Ed25519 challenge-réponse, sessions (+révocation), rate-limiter
+│   ├── store.go                # Store + JSON store (flush durable/fsync) + BlobStore (flux, quota, GC)
+│   ├── fsync_unix.go            # fsync de répertoire (POSIX)
+│   ├── fsync_windows.go         # no-op (Windows ne supporte pas fsync sur un répertoire)
+│   ├── server_test.go          # tests Go (F2/F3/F4/F5/F9/F10 + unlock + isolation)
+│   └── store_test.go           # tests durabilité (fail-closed index corrompu, nettoyage .tmp)
+├── tests/                      # tests Node hors-bundle (NON embarqués/servis)
+│   ├── crypto.test.mjs          # tests crypto (liaison AAD, anti reorder/troncature/splice)
+│   └── unlock.test.mjs          # tests du cœur crypto de déverrouillage (PRF simulée)
+├── e2e.test.mjs                # e2e (Node ↔ binaire) : flux fichiers
+├── e2e-unlock.test.mjs         # e2e : déverrouillage par clé matérielle
+├── e2e-move.test.mjs           # e2e : déplacement fichier/dossier
+├── web/                        # WebUI (servie embarquée — plus aucun fichier de test)
+│   ├── index.html               # aucun script/style inline (CSP-compatible)
 │   ├── style.css
-│   ├── crypto.js              # dérivation master, AES-GCM+AAD, sign, wrap/unwrap — TOUTE la crypto
-│   ├── webauthn.js            # déverrouillage par clé matérielle (WebAuthn/PRF)
-│   ├── app.js                 # appels API, upload/download/delete, déplacement, enrôlement/déverrouillage
-│   └── vendor/crypto.bundle.js# @noble/ed25519 + @noble/hashes + @scure/bip39 (40 ko)
-├── Dockerfile                 # image scratch (binaire statique)
+│   ├── crypto.js                # dérivation master, AES-GCM+AAD, sign, wrap/unwrap — TOUTE la crypto
+│   ├── webauthn.js              # déverrouillage par clé matérielle (WebAuthn/PRF)
+│   ├── app.js                   # appels API, upload/download/delete, déplacement, enrôlement/déverrouillage
+│   └── vendor/crypto.bundle.js  # @noble/ed25519 + @noble/hashes + @scure/bip39 (40 ko)
+├── Dockerfile                  # image scratch (binaire statique, non-root)
+├── docker-compose.yml          # Option B : p2pfs + Caddy (exposition publique, TLS Let's Encrypt)
+├── docker-compose.tailscale.yml# Option C : p2pfs seul (exposition via tailscale serve)
+├── .env.example                # DOMAIN, P2PFS_PORT — copier en .env
 └── deploy/
-    ├── Caddyfile              # TLS auto + headers
-    ├── p2pfs.service         # systemd durci (sandboxing)
-    ├── harden.sh              # durcissement VPS idempotent
-    ├── gcp.md                 # guide de déploiement GCP Compute Engine (firewall VPC, snapshots…)
-    └── backup.sh              # sauvegarde applicative cohérente (tar + GCS optionnel)
+    └── Caddyfile.docker        # reverse-proxy pour docker-compose.yml (Option B)
 ```
 
 ## TESTS (rejouables)
