@@ -18,7 +18,8 @@ const enc = new TextEncoder();
 const PRF_SALT = sha256(enc.encode('p2pfs-prf-salt-v1')); // 32 o
 // RP ID = le domaine. En prod ce doit être le domaine enregistrable (ex.
 // "vault.exemple.fr"), JAMAIS une IP. En local, "localhost" est accepté.
-const RP_ID = location.hostname;
+// Configurable via window.P2PFS_CONFIG.rpId pour la production.
+const RP_ID = window.P2PFS_CONFIG?.rpId || location.hostname;
 
 // Disponibilité de WebAuthn (la prise en charge réelle de PRF se confirme à
 // l'usage : on lit les résultats d'extension et on échoue proprement sinon).

@@ -26,7 +26,7 @@ import (
 
 const (
 	challengeTTL = 60 * time.Second
-	sessionTTL   = 12 * time.Hour
+	sessionTTL   = 2 * time.Hour  // Réduit de 12h à 2h pour limiter la fenêtre d'attaque
 	nonceBytes   = 32
 	tokenBytes   = 32
 )
@@ -106,7 +106,9 @@ func (a *Auth) Verify(pubkeyHex string, nonce, sig []byte) (string, bool) {
 	if subtle.ConstantTimeCompare(c.nonce, nonce) != 1 {
 		return "", false
 	}
-	if !ed25519.Verify(ed25519.PublicKey(pub), nonce, sig) {
+	// Contextualiser la signature pour éviter le rejeu inter-protocole
+	msg := append([]byte("p2pfs-auth-v1:"), nonce...)
+	if !ed25519.Verify(ed25519.PublicKey(pub), msg, sig) {
 		return "", false
 	}
 

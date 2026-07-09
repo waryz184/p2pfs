@@ -39,7 +39,7 @@ export const b64url = (u8) => b64(u8).replace(/=/g, '').replace(/\+/g, '-').repl
 export const unb64url = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return unb64(s); };
 
 // --- seed phrase ------------------------------------------------------------
-export function newMnemonic(strength = 128) {        // 128 bits = 12 mots
+export function newMnemonic(strength = 256) {        // 256 bits = 24 mots (sécurité renforcée)
   return bip39.generateMnemonic(wordlistEN, strength);
 }
 export function validMnemonic(m) {
@@ -78,18 +78,19 @@ export async function deriveIdentity(mnemonic) {
 // --- enveloppe du master key par un secret de déverrouillage ----------------
 // `secretBytes` = sortie PRF d'une clé matérielle (32 o, stable, jamais exposée
 // hors de l'authentificateur). On en dérive une clé d'enveloppe AES-GCM, puis on
-// chiffre/déchiffre le master key. L'AAD fige la version du schéma.
-const UNLOCK_AAD = () => enc.encode('p2pfs-master-wrap-v1');
+// chiffre/déchiffre le master key. L'AAD fige la version du schéma et lie le wrap
+// à l'identité du coffre (anti-détournement entre coffres).
+const UNLOCK_AAD = (pubHex) => enc.encode('p2pfs-master-wrap-v1:' + pubHex);
 
 export async function deriveUnlockKey(secretBytes) {
   const raw = hkdf(sha256, secretBytes, undefined, enc.encode('p2pfs-unlock-v1'), 32);
   return subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
-export async function wrapMaster(unlockKey, master) {        // -> base64
-  return b64(await gcmEncrypt(unlockKey, master, UNLOCK_AAD()));
+export async function wrapMaster(unlockKey, master, pubHex) {        // -> base64
+  return b64(await gcmEncrypt(unlockKey, master, UNLOCK_AAD(pubHex)));
 }
-export async function unwrapMaster(unlockKey, wrapB64) {     // -> Uint8Array (master 64 o)
-  return await gcmDecrypt(unlockKey, unb64(wrapB64), UNLOCK_AAD());
+export async function unwrapMaster(unlockKey, wrapB64, pubHex) {     // -> Uint8Array (master 64 o)
+  return await gcmDecrypt(unlockKey, unb64(wrapB64), UNLOCK_AAD(pubHex));
 }
 
 // --- AES-GCM bas niveau -----------------------------------------------------

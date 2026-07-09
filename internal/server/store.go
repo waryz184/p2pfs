@@ -82,6 +82,8 @@ type Store interface {
 	ListFiles(owner string) ([]FileMeta, error)
 	GetFile(owner, id string) (FileMeta, error)
 	DeleteFile(owner, id string) (FileMeta, error)
+	// FileByEncName vérifie les collisions de noms chiffrés (anti-TOCTOU)
+	FileByEncName(owner, encName string) (FileMeta, error)
 
 	// BlobOwned : un blob n'est lisible que s'il est référencé par un fichier
 	// appartenant à `owner`. Empêche l'énumération des blobs d'autrui.
@@ -222,6 +224,19 @@ func (s *jsonStore) PutFile(m FileMeta) error {
 	}
 	s.Files[m.Owner][m.ID] = m
 	return s.flush()
+}
+
+// FileByEncName vérifie s'il existe déjà un fichier avec ce nom chiffré pour un owner donné.
+// Renvoie le fichier existant si trouvé, ErrNotFound sinon.
+func (s *jsonStore) FileByEncName(owner, encName string) (FileMeta, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, m := range s.Files[owner] {
+		if m.EncName == encName {
+			return m, nil
+		}
+	}
+	return FileMeta{}, ErrNotFound
 }
 
 func (s *jsonStore) ListFiles(owner string) ([]FileMeta, error) {

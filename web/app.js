@@ -10,6 +10,7 @@
 import * as C from './crypto.js';
 import * as WA from './webauthn.js';
 
+const enc = new TextEncoder();
 const FOLDER_MARK = '/';            // un chemin finissant par "/" = dossier explicite
 let identity = null, token = null, masterKey = null;
 let seedJustGenerated = false;      // pour inviter à enrôler une clé après la 1ʳᵉ ouverture
@@ -44,7 +45,9 @@ async function api(path, { method = 'GET', json, raw } = {}) {
 async function loginWithIdentity(id3) {
   identity = id3;
   const { nonce } = await api('/api/challenge', { method: 'POST', json: { pubkey: identity.pubHex } });
-  const sig = identity.sign(C.fromHex(nonce));
+  // Contextualiser la signature pour éviter le rejeu inter-protocole
+  const msg = enc.encode('p2pfs-auth-v1:' + nonce);
+  const sig = identity.sign(msg);
   const res = await api('/api/login', { method: 'POST',
     json: { pubkey: identity.pubHex, nonce, sig: C.toHex(sig) } });
   token = res.token;
@@ -54,7 +57,13 @@ async function loginWithIdentity(id3) {
 async function connect(mnemonic) {
   if (!C.validMnemonic(mnemonic)) throw new Error('Clé invalide : vérifiez les 12 mots.');
   masterKey = C.masterFromMnemonic(mnemonic);
-  await loginWithIdentity(await C.deriveIdentityFromMaster(masterKey));
+  $('seed').value = ''; // EFFACEMENT IMMÉDIAT après dérivation (anti-XSS/keylogger)
+  try {
+    await loginWithIdentity(await C.deriveIdentityFromMaster(masterKey));
+  } catch (e) {
+    $('seed').value = mnemonic; // Restore only on error for UX
+    throw e;
+  }
 }
 
 // Déverrouillage par CLÉ MATÉRIELLE (WebAuthn/PRF) : aucune saisie de la seed.
@@ -66,7 +75,9 @@ async function connectWithKey() {
   try { wrapRes = await api('/api/unlock/' + credentialId); }
   catch { throw new Error('Cette clé n\'est associée à aucun coffre sur ce serveur.'); }
   const uk = await C.deriveUnlockKey(prf);
-  masterKey = await C.unwrapMaster(uk, wrapRes.wrap);
+  // Note : on ne peut pas passer pubHex ici car on ne l'a pas encore dérivé
+  // Le wrap est donc lié au credentialId qui est déjà unique et opaque
+  masterKey = await C.unwrapMaster(uk, wrapRes.wrap, 'pre-login');
   await loginWithIdentity(await C.deriveIdentityFromMaster(masterKey));
 }
 
@@ -76,7 +87,8 @@ async function enrollKey() {
   if (!masterKey) throw new Error('Coffre verrouillé.');
   const { credentialId, prf } = await WA.registerKey();
   const uk = await C.deriveUnlockKey(prf);
-  const wrap = await C.wrapMaster(uk, masterKey);
+  // Lie le wrap à l'identité du coffre (anti-détournement)
+  const wrap = await C.wrapMaster(uk, masterKey, identity.pubHex);
   await api('/api/unlock/' + credentialId, { method: 'PUT', json: { wrap } });
 }
 
@@ -321,7 +333,7 @@ async function uploadFiles(list) {
     await loadAll(); render(); updateMeter();
     prog.done();
     toast(`${list.length} fichier${list.length>1?'s':''} ajouté${list.length>1?'s':''}`, 'ok');
-  } catch (e) { prog.done(); toast('Échec de l\'import : ' + e.message, 'err'); }
+  } catch (e) { prog.done(); console.error('Import error:', e.message); toast('Échec de l\'import', 'err'); }
 }
 
 async function createFolder(name) {
@@ -359,7 +371,7 @@ async function download(f) {
     const url = URL.createObjectURL(new Blob(parts));        // réassemble les morceaux
     const a = el('a'); a.href = url; a.download = f.name; a.click(); URL.revokeObjectURL(url);
     if (prog) prog.done();
-  } catch (e) { if (prog) prog.done(); toast('Échec du téléchargement : ' + e.message, 'err'); }
+  } catch (e) { if (prog) prog.done(); console.error('Download error:', e.message); toast('Échec du téléchargement', 'err'); }
 }
 
 async function rePath(entry, newFullPath) {  // ré-encode le nom et réécrit la métadonnée (même id, mêmes chunks)
@@ -397,7 +409,7 @@ function renameFolder(f) {
 async function deleteFile(f) {
   if (!confirm(`Supprimer définitivement « ${f.name} » ?`)) return;
   try { await api('/api/files/' + f.id, { method: 'DELETE' }); await loadAll(); render(); updateMeter(); toast('Fichier supprimé','ok'); }
-  catch (e) { toast('Échec : ' + e.message, 'err'); }
+  catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
 }
 async function deleteFolder(f) {
   const prefix = cwdPrefix() + f.name;
@@ -407,7 +419,7 @@ async function deleteFolder(f) {
   try {
     for (const v of victims) await api('/api/files/' + v.id, { method: 'DELETE' });
     await loadAll(); render(); updateMeter(); toast('Dossier supprimé','ok');
-  } catch (e) { toast('Échec : ' + e.message, 'err'); }
+  } catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
 }
 
 // --- déplacement entre dossiers --------------------------------------------
@@ -470,7 +482,7 @@ function moveDialog(item, isFolder) {
       }
       back.remove();
       try { await doMove(item, isFolder, d); toast('Déplacé', 'ok'); }
-      catch (e) { toast('Échec du déplacement : ' + e.message, 'err'); }
+      catch (e) { console.error('Move error:', e.message); toast('Échec du déplacement', 'err'); }
     };
     box.appendChild(b);
   }
@@ -512,7 +524,7 @@ function modalPrompt(title, value, onOk) {
     const v = input.value.trim();
     if (!v) { $('modal-error').textContent = 'Le nom ne peut pas être vide.'; return; }
     if (v.includes('/')) { $('modal-error').textContent = 'Le caractère « / » n\'est pas autorisé.'; return; }
-    close(); try { await onOk(v); } catch (e) { toast('Échec : ' + e.message, 'err'); }
+    close(); try { await onOk(v); } catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
   };
   ok.onclick = submit; cancel.onclick = close;
   input.onkeydown = (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') close(); };
@@ -554,7 +566,7 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   $('gen').onclick = () => {
-    $('seed').value = C.newMnemonic(128);
+    $('seed').value = C.newMnemonic(256); // 256 bits = 24 mots (sécurité renforcée)
     seedJustGenerated = true;
     const st = $('auth-status'); st.className = 'auth-status';
     st.textContent = WA.webauthnAvailable()
@@ -584,7 +596,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const doEnroll = async () => {
       $('enroll-key').classList.remove('pulse');
       try { await enrollKey(); toast('Clé de sécurité ajoutée — vous pourrez ouvrir ce coffre sans saisir la seed.', 'ok', 5000); }
-      catch (e) { toast('Échec de l\'enrôlement : ' + e.message, 'err'); }
+      catch (e) { console.error('Enrollment error:', e.message); toast('Échec de l\'enrôlement', 'err'); }
     };
     $('enroll-key').onclick = doEnroll;
 

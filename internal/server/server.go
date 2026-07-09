@@ -434,6 +434,14 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request, owner str
 		}
 	}
 
+	// Vérification des collisions de noms (anti-TOCTOU côté client)
+	// On autorise le même ID (renommage/réécriture) mais on refuse les doublons
+	existing, err := s.store.FileByEncName(owner, m.EncName)
+	if err == nil && existing.ID != m.ID {
+		http.Error(w, "name collision", http.StatusConflict)
+		return
+	}
+
 	m.CreatedAt = time.Time{} // le store fixe/conserve la date
 	if err := s.store.PutFile(m); err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
