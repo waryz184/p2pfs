@@ -92,6 +92,21 @@ func authReq(t *testing.T, ts *httptest.Server, method, path, token string, body
 	return resp
 }
 
+// doGet fait un GET authentifié et décode la réponse JSON (attend un 200).
+func doGet(t *testing.T, ts *httptest.Server, path, token string) map[string]any {
+	t.Helper()
+	resp := authReq(t, ts, "GET", path, token, nil, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s -> %d", path, resp.StatusCode)
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("GET %s: décodage JSON: %v", path, err)
+	}
+	return out
+}
+
 // putBlobResp dépose un blob et renvoie (id, statusHTTP).
 func putBlobResp(t *testing.T, ts *httptest.Server, token string, data []byte) (string, int) {
 	t.Helper()
@@ -198,6 +213,104 @@ func TestBlobGC_SharedBlobRetained(t *testing.T) {
 	authReq(t, ts, "DELETE", "/api/files/fileB", token, nil, "").Body.Close()
 	if s.blobs.Has(id) {
 		t.Error("blob non libéré après suppression du dernier référent")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Corbeille — suppression réversible (/trash, /restore), distincte de la
+// purge définitive (DELETE, testée ci-dessus par TestBlobGC_*).
+// ---------------------------------------------------------------------------
+
+func TestTrash_SoftDeleteKeepsBlobAndIsListed(t *testing.T) {
+	ts, s := newTestServer(t, 0, 0)
+	token, _ := loginTest(t, ts)
+
+	data := []byte("contenu d'un fichier mis à la corbeille")
+	id, _ := putBlobResp(t, ts, token, data)
+	if c := putFileResp(t, ts, token, "trashme", id, int64(len(data))); c != http.StatusOK {
+		t.Fatalf("putFile -> %d", c)
+	}
+
+	resp := authReq(t, ts, "POST", "/api/files/trashme/trash", token, nil, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /trash -> %d", resp.StatusCode)
+	}
+	// Le blob n'est PAS ramassé : le fichier est récupérable.
+	if !s.blobs.Has(id) {
+		t.Error("blob effacé par un soft delete (corbeille) — devrait rester intact")
+	}
+	// La métadonnée reste listée, avec deleted_at renseigné.
+	out := doGet(t, ts, "/api/files", token)
+	files, _ := out["files"].([]any)
+	var found map[string]any
+	for _, f := range files {
+		if m := f.(map[string]any); m["id"] == "trashme" {
+			found = m
+		}
+	}
+	if found == nil {
+		t.Fatal("fichier trashé absent du listing (devrait rester visible, deleted_at renseigné)")
+	}
+	if found["deleted_at"] == nil || found["deleted_at"] == "" {
+		t.Error("deleted_at absent/vide après mise à la corbeille")
+	}
+}
+
+func TestTrash_Restore(t *testing.T) {
+	ts, _ := newTestServer(t, 0, 0)
+	token, _ := loginTest(t, ts)
+
+	data := []byte("fichier restauré")
+	id, _ := putBlobResp(t, ts, token, data)
+	putFileResp(t, ts, token, "restoreme", id, int64(len(data)))
+	authReq(t, ts, "POST", "/api/files/restoreme/trash", token, nil, "").Body.Close()
+
+	resp := authReq(t, ts, "POST", "/api/files/restoreme/restore", token, nil, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /restore -> %d", resp.StatusCode)
+	}
+	out := doGet(t, ts, "/api/files", token)
+	files, _ := out["files"].([]any)
+	for _, f := range files {
+		m := f.(map[string]any)
+		if m["id"] == "restoreme" && m["deleted_at"] != nil && m["deleted_at"] != "" {
+			t.Error("deleted_at toujours présent après restauration")
+		}
+	}
+}
+
+func TestTrash_PurgeAfterTrashRemovesBlob(t *testing.T) {
+	ts, s := newTestServer(t, 0, 0)
+	token, _ := loginTest(t, ts)
+
+	data := []byte("fichier trashé puis purgé définitivement")
+	id, _ := putBlobResp(t, ts, token, data)
+	putFileResp(t, ts, token, "purgeme", id, int64(len(data)))
+	authReq(t, ts, "POST", "/api/files/purgeme/trash", token, nil, "").Body.Close()
+
+	// DELETE (purge définitive) fonctionne aussi sur un fichier déjà trashé, et
+	// ramasse le blob comme une suppression normale.
+	resp := authReq(t, ts, "DELETE", "/api/files/purgeme", token, nil, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE (purge) -> %d", resp.StatusCode)
+	}
+	if s.blobs.Has(id) {
+		t.Error("blob toujours présent après purge définitive d'un fichier trashé")
+	}
+}
+
+func TestTrash_UnknownIDNotFound(t *testing.T) {
+	ts, _ := newTestServer(t, 0, 0)
+	token, _ := loginTest(t, ts)
+
+	if resp := authReq(t, ts, "POST", "/api/files/nope/trash", token, nil, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("trash inconnu -> %d, attendu 404", resp.StatusCode)
+	}
+	if resp := authReq(t, ts, "POST", "/api/files/nope/restore", token, nil, ""); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("restore inconnu -> %d, attendu 404", resp.StatusCode)
 	}
 }
 

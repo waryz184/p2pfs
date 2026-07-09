@@ -13,11 +13,17 @@ import * as WA from './webauthn.js';
 const FOLDER_MARK = '/';            // un chemin finissant par "/" = dossier explicite
 let identity = null, token = null, masterKey = null;
 let seedJustGenerated = false;      // pour inviter à enrôler une clé après la 1ʳᵉ ouverture
-let entries = [];                   // [{id, blobId, wrappedKey, contentIV, size, createdAt, path, isFolder}]
+let entries = [];                   // [{id, blobId, wrappedKey, contentIV, size, createdAt, deletedAt, path, isFolder}]
 let cwd = [];                       // dossier courant, ex. ['Documents','factures']
-let nav = 'files';                  // 'files' | 'recent'
+let nav = 'files';                  // 'files' | 'recent' | 'trash'
 let view = 'grid';
 let query = '';
+let sortBy = 'name';                // 'name' | 'size' | 'date' (vue « Mes fichiers » uniquement)
+let sortDir = 'asc';                // 'asc' | 'desc'
+let selected = new Set();           // ids sélectionnés (fichiers uniquement, multi-sélection)
+let sessionTimer = null;            // renouvellement silencieux avant expiration
+const thumbCache = new Map();       // id -> URL objet (miniature image déchiffrée, revoquée au verrouillage)
+let thumbObserver = null;           // IntersectionObserver : décryptage paresseux des miniatures
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
@@ -48,6 +54,20 @@ async function loginWithIdentity(id3) {
   const res = await api('/api/login', { method: 'POST',
     json: { pubkey: identity.pubHex, nonce, sig: C.toHex(sig) } });
   token = res.token;
+  if (res.expires_in) scheduleSessionRefresh(res.expires_in);
+}
+
+// Renouvelle la session AVANT expiration, sans ré-intervention de l'utilisateur :
+// l'identité (clé Ed25519 dérivée) reste en mémoire, il suffit de rejouer le
+// challenge/réponse. Ne redemande jamais la seed.
+function scheduleSessionRefresh(expiresIn) {
+  clearTimeout(sessionTimer);
+  const marginMs = Math.min(120_000, expiresIn * 1000 / 4); // 2 min avant expiration (ou 1/4 si TTL très court)
+  const delay = Math.max(5_000, expiresIn * 1000 - marginMs);
+  sessionTimer = setTimeout(async () => {
+    try { await loginWithIdentity(identity); }
+    catch { toast('Votre session va bientôt expirer — reconnectez-vous si besoin.', 'err', 8000); }
+  }, delay);
 }
 
 // Déverrouillage par seed phrase (récupération / 1ʳᵉ ouverture).
@@ -99,7 +119,7 @@ async function loadAll() {
     const isFolder = path.endsWith(FOLDER_MARK);
     out.push({
       id: f.id, wrappedKey: f.wrapped_key, chunks: f.chunks || [],
-      size: f.size, createdAt: f.created_at,
+      size: f.size, createdAt: f.created_at, deletedAt: f.deleted_at || null,
       path: isFolder ? path.slice(0, -1) : path, isFolder,
     });
   }
@@ -108,11 +128,14 @@ async function loadAll() {
 
 // --- dérive le contenu du dossier courant ----------------------------------
 function currentItems() {
+  if (nav === 'trash') return trashItems();
+
   const prefix = cwdPrefix();
   const folders = new Map();   // nom -> {createdAt}
   const files = [];
 
   for (const e of entries) {
+    if (e.deletedAt) continue;                    // dans la corbeille : invisible ici
     if (nav === 'recent') {                       // vue plate, tous les fichiers
       if (!e.isFolder) files.push(e);
       continue;
@@ -139,14 +162,39 @@ function currentItems() {
     folderList = folderList.filter(f => f.name.toLowerCase().includes(q));
     fileList = fileList.filter(f => f.name.toLowerCase().includes(q));
   }
+  folderList.sort((a, b) => a.name.localeCompare(b.name));
   if (nav === 'recent') {
     fileList.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     folderList = [];
   } else {
-    folderList.sort((a, b) => a.name.localeCompare(b.name));
-    fileList.sort((a, b) => a.name.localeCompare(b.name));
+    sortInPlace(fileList);
   }
   return { folderList, fileList };
+}
+
+// Tri configurable (nom/taille/date, asc/desc) — vue « Mes fichiers » uniquement.
+function sortInPlace(list) {
+  const dir = sortDir === 'desc' ? -1 : 1;
+  list.sort((a, b) => {
+    let cmp;
+    if (sortBy === 'size') cmp = a.size - b.size;
+    else if (sortBy === 'date') cmp = new Date(a.createdAt) - new Date(b.createdAt);
+    else cmp = a.name.localeCompare(b.name);
+    return cmp * dir;
+  });
+  return list;
+}
+
+// Vue « Corbeille » : liste plate de tout ce qui est marqué deletedAt, triée
+// par date de suppression décroissante (le plus récent en premier).
+function trashItems() {
+  let fileList = entries.filter(e => e.deletedAt).map(e => ({ ...e, name: e.path.split('/').pop() || e.path }));
+  if (query) {
+    const q = query.toLowerCase();
+    fileList = fileList.filter(f => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q));
+  }
+  fileList.sort((a, b) => new Date(b.deletedAt) - new Date(a.deletedAt));
+  return { folderList: [], fileList };
 }
 
 // --- icônes par type --------------------------------------------------------
@@ -183,6 +231,9 @@ function iconSVG(kind, cls) {
 // --- rendu ------------------------------------------------------------------
 function render() {
   renderCrumbs();
+  $('trash-bar').classList.toggle('hidden', nav !== 'trash');
+  $('sort-tools').classList.toggle('hidden', nav !== 'files');
+  if (thumbObserver) { thumbObserver.disconnect(); thumbObserver = null; } // pas d'observations mortes entre rendus
   const { folderList, fileList } = currentItems();
   const grid = $('grid'), listBody = $('list-body'), empty = $('empty');
   grid.innerHTML = ''; listBody.innerHTML = '';
@@ -191,6 +242,8 @@ function render() {
     empty.classList.remove('hidden'); $('grid').classList.add('hidden'); $('list').classList.add('hidden');
     empty.innerHTML = query
       ? `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><h2>Aucun résultat</h2><p>Rien ne correspond à « ${escapeHtml(query)} ».</p>`
+      : nav === 'trash'
+      ? `<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg><h2>Corbeille vide</h2><p>Les fichiers supprimés apparaissent ici.</p>`
       : `<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg><h2>Ce dossier est vide</h2><p>Glissez des fichiers ici, ou utilisez le bouton Nouveau.</p>`;
     return;
   }
@@ -198,17 +251,23 @@ function render() {
   grid.classList.toggle('hidden', view !== 'grid');
   $('list').classList.toggle('hidden', view !== 'list');
 
-  for (const f of folderList) view === 'grid' ? grid.appendChild(folderTile(f)) : listBody.appendChild(folderRow(f));
-  for (const f of fileList)   view === 'grid' ? grid.appendChild(fileTile(f))   : listBody.appendChild(fileRow(f));
+  if (nav === 'trash') {
+    for (const f of fileList) view === 'grid' ? grid.appendChild(trashTile(f)) : listBody.appendChild(trashRow(f));
+  } else {
+    for (const f of folderList) view === 'grid' ? grid.appendChild(folderTile(f)) : listBody.appendChild(folderRow(f));
+    for (const f of fileList)   view === 'grid' ? grid.appendChild(fileTile(f))   : listBody.appendChild(fileRow(f));
+  }
+  updateBulkBar();
 }
 
 function renderCrumbs() {
   const c = $('crumbs'); c.innerHTML = '';
-  const root = el('button'); root.textContent = nav === 'recent' ? 'Récents' : 'Mes fichiers';
-  if (!cwd.length || nav === 'recent') root.className = 'current';
-  root.onclick = () => { if (nav !== 'recent') { cwd = []; render(); } };
+  const label = nav === 'recent' ? 'Récents' : nav === 'trash' ? 'Corbeille' : 'Mes fichiers';
+  const root = el('button'); root.textContent = label;
+  if (!cwd.length || nav !== 'files') root.className = 'current';
+  root.onclick = () => { if (nav === 'files') { cwd = []; render(); } };
   c.appendChild(root);
-  if (nav === 'recent') return;
+  if (nav !== 'files') return;
   cwd.forEach((seg, i) => {
     const sep = el('span', 'sep'); sep.textContent = '›'; c.appendChild(sep);
     const b = el('button'); b.textContent = seg;
@@ -216,6 +275,21 @@ function renderCrumbs() {
     b.onclick = () => { cwd = cwd.slice(0, i + 1); render(); };
     c.appendChild(b);
   });
+}
+
+// case à cocher de sélection multiple (fichiers uniquement — les dossiers ne
+// sont qu'un préfixe de chemin déduit, pas une entité adressable par id seul).
+function selCheckbox(id) {
+  const label = el('label', 'sel-check');
+  const cb = el('input'); cb.type = 'checkbox'; cb.checked = selected.has(id);
+  cb.onclick = (e) => {
+    e.stopPropagation();
+    if (cb.checked) selected.add(id); else selected.delete(id);
+    document.querySelectorAll(`[data-id="${id}"]`).forEach(n => n.classList.toggle('selected', cb.checked));
+    updateBulkBar();
+  };
+  label.appendChild(cb);
+  return label;
 }
 
 // tuiles (grille)
@@ -228,10 +302,25 @@ function folderTile(f) {
 }
 function fileTile(f) {
   const t = el('div', 'tile');
+  t.dataset.id = f.id;
+  if (selected.has(f.id)) t.classList.add('selected');
   t.innerHTML = iconSVG(kindOf(f.name), 'ico') +
     `<div class="t-name">${escapeHtml(f.name)}</div><div class="t-meta">${humanSize(f.size)}</div>`;
+  t.prepend(selCheckbox(f.id));
   t.appendChild(moreMenu(() => openFileActions(f)));
-  t.ondblclick = () => download(f);
+  t.ondblclick = () => openPreview(f);
+  maybeThumbnail(t, f);
+  return t;
+}
+function trashTile(f) {
+  const t = el('div', 'tile');
+  t.dataset.id = f.id;
+  if (selected.has(f.id)) t.classList.add('selected');
+  const kind = f.isFolder ? 'folder' : kindOf(f.name);
+  t.innerHTML = iconSVG(kind, 'ico') +
+    `<div class="t-name">${escapeHtml(f.name)}</div><div class="t-meta">${escapeHtml(f.path)}</div>`;
+  t.prepend(selCheckbox(f.id));
+  t.appendChild(moreMenu(() => openTrashActions(f)));
   return t;
 }
 function moreMenu(onClick) {
@@ -245,26 +334,43 @@ function moreMenu(onClick) {
 function folderRow(f) {
   const tr = el('tr');
   const td = el('td'); td.className = 'l-name'; td.innerHTML = iconSVG('folder','ico') + `<span>${escapeHtml(f.name)}</span>`;
-  tr.append(td, tdText('—','c-size'), tdText(fmtDate(f.createdAt),'c-date'));
+  tr.append(tdText('', 'c-sel'), td, tdText('—','c-size'), tdText(fmtDate(f.createdAt),'c-date'));
   const act = el('td', 'c-act'); act.appendChild(rowActions([
     ['Déplacer', moveIcon(), () => moveDialog(f, true)],
     ['Renommer', renameIcon(), () => renameFolder(f)],
-    ['Supprimer', trashIcon(), () => deleteFolder(f), true],
+    ['Corbeille', trashIcon(), () => trashFolder(f), true],
   ])); tr.appendChild(act);
   tr.ondblclick = () => { cwd = [...cwd, f.name]; query=''; $('search').value=''; render(); };
   return tr;
 }
 function fileRow(f) {
   const tr = el('tr');
+  tr.dataset.id = f.id;
+  if (selected.has(f.id)) tr.classList.add('selected');
+  const sel = el('td', 'c-sel'); sel.appendChild(selCheckbox(f.id));
   const td = el('td'); td.className = 'l-name'; td.innerHTML = iconSVG(kindOf(f.name),'ico') + `<span>${escapeHtml(f.name)}</span>`;
-  tr.append(td, tdText(humanSize(f.size),'c-size'), tdText(fmtDate(f.createdAt),'c-date'));
+  tr.append(sel, td, tdText(humanSize(f.size),'c-size'), tdText(fmtDate(f.createdAt),'c-date'));
   const act = el('td', 'c-act'); act.appendChild(rowActions([
     ['Télécharger', dlIcon(), () => download(f)],
     ['Déplacer', moveIcon(), () => moveDialog(f, false)],
     ['Renommer', renameIcon(), () => renameFile(f)],
-    ['Supprimer', trashIcon(), () => deleteFile(f), true],
+    ['Corbeille', trashIcon(), () => trashFile(f), true],
   ])); tr.appendChild(act);
-  tr.ondblclick = () => download(f);
+  tr.ondblclick = () => openPreview(f);
+  return tr;
+}
+function trashRow(f) {
+  const tr = el('tr');
+  tr.dataset.id = f.id;
+  if (selected.has(f.id)) tr.classList.add('selected');
+  const sel = el('td', 'c-sel'); sel.appendChild(selCheckbox(f.id));
+  const kind = f.isFolder ? 'folder' : kindOf(f.name);
+  const td = el('td'); td.className = 'l-name'; td.innerHTML = iconSVG(kind,'ico') + `<span>${escapeHtml(f.name)}</span>`;
+  tr.append(sel, td, tdText(f.path, 'c-size'), tdText(fmtDate(f.deletedAt),'c-date'));
+  const act = el('td', 'c-act'); act.appendChild(rowActions([
+    ['Restaurer', restoreIcon(), () => restoreOne(f)],
+    ['Supprimer définitivement', trashIcon(), () => purgeOne(f), true],
+  ])); tr.appendChild(act);
   return tr;
 }
 function tdText(txt, cls) { const td = el('td', cls); td.textContent = txt; return td; }
@@ -281,8 +387,10 @@ const dlIcon = () => `<svg class="ic" viewBox="0 0 24 24"><path d="M12 4v12M7 11
 const renameIcon = () => `<svg class="ic" viewBox="0 0 24 24"><path d="M4 20h4l10-10-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></svg>`;
 const trashIcon = () => `<svg class="ic" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>`;
 const moveIcon = () => `<svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v2"/><path d="M13 17h8M18 14l3 3-3 3"/></svg>`;
-function openFileActions(f){ openSheet([['Télécharger',()=>download(f)],['Déplacer',()=>moveDialog(f,false)],['Renommer',()=>renameFile(f)],['Supprimer',()=>deleteFile(f)]]); }
-function openFolderActions(f){ openSheet([['Ouvrir',()=>{cwd=[...cwd,f.name];render();}],['Déplacer',()=>moveDialog(f,true)],['Renommer',()=>renameFolder(f)],['Supprimer',()=>deleteFolder(f)]]); }
+const restoreIcon = () => `<svg class="ic" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>`;
+function openFileActions(f){ openSheet([['Télécharger',()=>download(f)],['Aperçu',()=>openPreview(f)],['Déplacer',()=>moveDialog(f,false)],['Renommer',()=>renameFile(f)],['Corbeille',()=>trashFile(f)]]); }
+function openFolderActions(f){ openSheet([['Ouvrir',()=>{cwd=[...cwd,f.name];render();}],['Déplacer',()=>moveDialog(f,true)],['Renommer',()=>renameFolder(f)],['Corbeille',()=>trashFolder(f)]]); }
+function openTrashActions(f){ openSheet([['Restaurer',()=>restoreOne(f)],['Supprimer définitivement',()=>purgeOne(f)]]); }
 function openSheet(items){ // menu d'actions flottant (utilisé par le bouton "…" en grille)
   const back = el('div','modal-back'); const m = el('div','modal');
   m.innerHTML = '<h3>Actions</h3>';
@@ -294,9 +402,10 @@ function openSheet(items){ // menu d'actions flottant (utilisé par le bouton "�
 }
 
 // --- actions fichiers -------------------------------------------------------
-async function uploadFile(file, prog) {
-  const prefix = cwdPrefix();
-  const fullPath = prefix + file.name;
+async function uploadFile(file, prog, fullPathOverride) {
+  // fullPathOverride : chemin relatif préservé pour un dossier glissé-déposé
+  // (traverseEntry) ; sinon le fichier est importé directement dans cwd.
+  const fullPath = fullPathOverride ?? (cwdPrefix() + file.name);
   // L'id logique est généré AVANT le chiffrement : il sert de contexte (AAD) qui
   // lie le nom, la DEK enveloppée et chaque morceau à CE fichier précis.
   const id = C.toHex(crypto.getRandomValues(new Uint8Array(16)));
@@ -322,14 +431,20 @@ async function uploadFile(file, prog) {
     id, enc_name: encName, wrapped_key: wrappedKey,
     size: chunks.reduce((s, c) => s + c.size, 0), chunks } });
 }
+// `list` : mélange possible de File bruts (import classique / drop de
+// fichiers) et de { file, fullPath } (dossier glissé-déposé, cf. traverseEntry).
 async function uploadFiles(list) {
-  const prog = progressToast(`Import de ${list.length} fichier${list.length>1?'s':''}…`);
+  const items = list.map(x => (x instanceof File) ? { file: x, fullPath: null } : x);
+  const prog = progressToast(`Import de ${items.length} fichier${items.length>1?'s':''}…`);
   try {
     let n = 0;
-    for (const f of list) { prog.update(`Chiffrement de « ${f.name} » (${++n}/${list.length})…`); await uploadFile(f, prog); }
+    for (const { file, fullPath } of items) {
+      prog.update(`Chiffrement de « ${file.name} » (${++n}/${items.length})…`);
+      await uploadFile(file, prog, fullPath);
+    }
     await loadAll(); render(); updateMeter();
     prog.done();
-    toast(`${list.length} fichier${list.length>1?'s':''} ajouté${list.length>1?'s':''}`, 'ok');
+    toast(`${items.length} fichier${items.length>1?'s':''} ajouté${items.length>1?'s':''}`, 'ok');
   } catch (e) { prog.done(); console.error('Import error:', e.message); toast('Échec de l\'import', 'err'); }
 }
 
@@ -349,26 +464,111 @@ async function createFolder(name) {
   toast(`Dossier « ${name} » créé`, 'ok');
 }
 
+// Récupère et déchiffre TOUS les morceaux d'un fichier en un seul Blob.
+// Cœur commun à download(), openPreview() et aux miniatures d'images.
+async function decryptFileToBlob(f, prog) {
+  const dek = await C.unwrapDEK(identity, f.wrappedKey, f.id);
+  const parts = [];
+  let done = 0;
+  const total = f.chunks.length;
+  for (let i = 0; i < total; i++) {
+    const c = f.chunks[i];
+    const ct = await api('/api/blob/' + c.blob_id);
+    // L'AAD (f.id, i, total) impose l'ordre ET le nombre de morceaux : un
+    // serveur qui réordonne ou tronque le manifeste fait échouer GCM ici.
+    parts.push(await C.decryptChunk(dek, ct, c.iv, f.id, i, total));
+    done += c.size;
+    if (prog) prog.update(`« ${f.name} » — ${humanSize(done)} / ${humanSize(f.size)}`);
+  }
+  return new Blob(parts);
+}
 async function download(f) {
   const prog = (f.chunks.length > 1) ? progressToast(`Téléchargement de « ${f.name} »…`) : null;
   try {
-    const dek = await C.unwrapDEK(identity, f.wrappedKey, f.id);
-    const parts = [];
-    let done = 0;
-    const total = f.chunks.length;
-    for (let i = 0; i < total; i++) {
-      const c = f.chunks[i];
-      const ct = await api('/api/blob/' + c.blob_id);
-      // L'AAD (f.id, i, total) impose l'ordre ET le nombre de morceaux : un
-      // serveur qui réordonne ou tronque le manifeste fait échouer GCM ici.
-      parts.push(await C.decryptChunk(dek, ct, c.iv, f.id, i, total));
-      done += c.size;
-      if (prog) prog.update(`« ${f.name} » — ${humanSize(done)} / ${humanSize(f.size)}`);
-    }
-    const url = URL.createObjectURL(new Blob(parts));        // réassemble les morceaux
+    const blob = await decryptFileToBlob(f, prog);
+    const url = URL.createObjectURL(blob);
     const a = el('a'); a.href = url; a.download = f.name; a.click(); URL.revokeObjectURL(url);
     if (prog) prog.done();
   } catch (e) { if (prog) prog.done(); console.error('Download error:', e.message); toast('Échec du téléchargement', 'err'); }
+}
+
+// --- aperçu inline (image / PDF / texte) ------------------------------------
+const TEXT_EXT = ['txt','md','json','js','ts','css','html','yml','yaml','sh','sql','csv','log','xml','go','py','rs','java','c','cpp'];
+function previewKind(f) {
+  const kind = kindOf(f.name);
+  if (kind === 'img') return 'image';
+  if (kind === 'pdf') return 'pdf';
+  const ext = f.name.split('.').pop().toLowerCase();
+  if (TEXT_EXT.includes(ext) && f.size <= 2 * 1024 * 1024) return 'text';
+  return null;
+}
+async function openPreview(f) {
+  const pk = previewKind(f);
+  if (!pk) return download(f); // pas d'aperçu possible : téléchargement direct
+  const back = $('preview-modal'), body = $('preview-body');
+  $('preview-title').textContent = f.name;
+  body.innerHTML = `<svg class="ic spin preview-spin" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/></svg>`;
+  back.classList.remove('hidden');
+  $('preview-dl').onclick = () => download(f);
+  const close = () => { back.classList.add('hidden'); if (currentUrl) URL.revokeObjectURL(currentUrl); };
+  $('preview-close').onclick = close;
+  back.onclick = (e) => { if (e.target === back) close(); };
+  let currentUrl = null;
+  try {
+    const blob = await decryptFileToBlob(f);
+    if (pk === 'image') {
+      currentUrl = URL.createObjectURL(blob);
+      body.innerHTML = `<img alt="${escapeHtml(f.name)}">`;
+      body.querySelector('img').src = currentUrl;
+    } else if (pk === 'pdf') {
+      currentUrl = URL.createObjectURL(blob);
+      body.innerHTML = `<embed type="application/pdf">`;
+      body.querySelector('embed').src = currentUrl;
+    } else {
+      const text = await blob.text();
+      body.innerHTML = '<pre></pre>';
+      body.querySelector('pre').textContent = text; // textContent : jamais interprété comme HTML
+    }
+  } catch (e) {
+    console.error('Preview error:', e.message);
+    body.innerHTML = `<p class="modal-text">Aperçu impossible.</p>`;
+  }
+}
+
+// --- miniatures d'images (grille) -------------------------------------------
+// Décryptage paresseux : seules les tuiles qui entrent dans le viewport
+// déclenchent le déchiffrement (une image entière, pas un vrai thumbnail —
+// le serveur ne peut pas en générer, zero-knowledge oblige). Résultat mis en
+// cache par id de fichier ; revoqué au verrouillage du coffre.
+function ensureThumbObserver() {
+  if (!thumbObserver) {
+    thumbObserver = new IntersectionObserver((obs) => {
+      for (const en of obs) {
+        if (!en.isIntersecting) continue;
+        thumbObserver.unobserve(en.target);
+        loadThumb(en.target, en.target.dataset.thumbId);
+      }
+    }, { root: document.querySelector('.canvas'), rootMargin: '200px' });
+  }
+  return thumbObserver;
+}
+function maybeThumbnail(tileEl, f) {
+  if (kindOf(f.name) !== 'img' || f.size > 8 * 1024 * 1024) return;
+  tileEl.dataset.thumbId = f.id;
+  ensureThumbObserver().observe(tileEl);
+}
+async function loadThumb(tileEl, id) {
+  const f = entries.find(e => e.id === id);
+  if (!f) return;
+  let url = thumbCache.get(id);
+  if (!url) {
+    try { url = URL.createObjectURL(await decryptFileToBlob(f)); thumbCache.set(id, url); }
+    catch { return; }
+  }
+  const ico = tileEl.querySelector('.ico');
+  if (!ico || !tileEl.isConnected) return; // tuile déjà remplacée par un re-rendu
+  const img = el('img', 'ico thumb-img'); img.src = url; img.alt = '';
+  ico.replaceWith(img);
 }
 
 async function rePath(entry, newFullPath) {  // ré-encode le nom et réécrit la métadonnée (même id, mêmes chunks)
@@ -403,20 +603,102 @@ function renameFolder(f) {
     await loadAll(); render(); toast('Dossier renommé', 'ok');
   });
 }
-async function deleteFile(f) {
-  if (!confirm(`Supprimer définitivement « ${f.name} » ?`)) return;
-  try { await api('/api/files/' + f.id, { method: 'DELETE' }); await loadAll(); render(); updateMeter(); toast('Fichier supprimé','ok'); }
+// --- corbeille (suppression réversible) -------------------------------------
+// Déplacer vers la corbeille est réversible : pas de confirm() (contrairement
+// à la purge définitive, qui elle demande confirmation).
+async function trashFile(f) {
+  try { await api('/api/files/' + f.id + '/trash', { method: 'POST' }); selected.delete(f.id);
+    await loadAll(); render(); updateMeter(); toast('Déplacé vers la corbeille', 'ok'); }
   catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
 }
-async function deleteFolder(f) {
+async function trashFolder(f) {
   const prefix = cwdPrefix() + f.name;
   const victims = entries.filter(e => e.path === prefix || e.path.startsWith(prefix + '/'));
-  const fileCount = victims.filter(v => !v.isFolder).length;
-  if (!confirm(`Supprimer « ${f.name} » et ${fileCount} fichier${fileCount>1?'s':''} ? Action définitive.`)) return;
+  try {
+    for (const v of victims) await api('/api/files/' + v.id + '/trash', { method: 'POST' });
+    await loadAll(); render(); updateMeter(); toast('Dossier déplacé vers la corbeille', 'ok');
+  } catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
+}
+async function restoreOne(f) {
+  try { await api('/api/files/' + f.id + '/restore', { method: 'POST' }); selected.delete(f.id);
+    await loadAll(); render(); updateMeter(); toast('Fichier restauré', 'ok'); }
+  catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
+}
+async function purgeOne(f) {
+  if (!confirm(`Supprimer définitivement « ${f.name} » ? Action irréversible.`)) return;
+  try { await api('/api/files/' + f.id, { method: 'DELETE' }); selected.delete(f.id);
+    await loadAll(); render(); updateMeter(); toast('Supprimé définitivement', 'ok'); }
+  catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
+}
+async function emptyTrash() {
+  const victims = entries.filter(e => e.deletedAt);
+  if (!victims.length) return;
+  if (!confirm(`Supprimer définitivement ${victims.length} élément${victims.length>1?'s':''} de la corbeille ? Action irréversible.`)) return;
   try {
     for (const v of victims) await api('/api/files/' + v.id, { method: 'DELETE' });
-    await loadAll(); render(); updateMeter(); toast('Dossier supprimé','ok');
+    selected.clear(); await loadAll(); render(); updateMeter(); toast('Corbeille vidée', 'ok');
   } catch (e) { console.error('Error:', e.message); toast('Échec', 'err'); }
+}
+
+// --- sélection multiple + actions groupées ----------------------------------
+function updateBulkBar() {
+  const bar = $('bulk-bar');
+  if (!selected.size) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  $('bulk-count').textContent = `${selected.size} sélectionné${selected.size>1?'s':''}`;
+  const inTrash = nav === 'trash';
+  $('bulk-move').classList.toggle('hidden', inTrash);
+  $('bulk-trash').classList.toggle('hidden', inTrash);
+  $('bulk-restore').classList.toggle('hidden', !inTrash);
+  $('bulk-purge').classList.toggle('hidden', !inTrash);
+}
+function selectedEntries() { return entries.filter(e => selected.has(e.id)); }
+function clearSelection() { selected.clear(); render(); }
+async function bulkTrash() {
+  for (const f of selectedEntries()) await api('/api/files/' + f.id + '/trash', { method: 'POST' });
+  selected.clear(); await loadAll(); render(); updateMeter(); toast('Déplacés vers la corbeille', 'ok');
+}
+async function bulkRestore() {
+  for (const f of selectedEntries()) await api('/api/files/' + f.id + '/restore', { method: 'POST' });
+  selected.clear(); await loadAll(); render(); updateMeter(); toast('Fichiers restaurés', 'ok');
+}
+async function bulkPurge() {
+  const items = selectedEntries();
+  if (!confirm(`Supprimer définitivement ${items.length} élément${items.length>1?'s':''} ? Action irréversible.`)) return;
+  for (const f of items) await api('/api/files/' + f.id, { method: 'DELETE' });
+  selected.clear(); await loadAll(); render(); updateMeter(); toast('Supprimés définitivement', 'ok');
+}
+// Déplacement groupé : fichiers uniquement (les dossiers se déplacent depuis
+// leur propre menu, cf. moveDialog). Ignore silencieusement les collisions de
+// nom individuelles pour ne pas bloquer tout le lot.
+function bulkMoveDialog() {
+  const items = selectedEntries();
+  const back = el('div', 'modal-back'); const m = el('div', 'modal');
+  m.innerHTML = `<h3>Déplacer ${items.length} fichier${items.length>1?'s':''}</h3>`;
+  const box = el('div', 'move-list');
+  const dests = [''].concat(allFolderPaths());
+  for (const d of dests) {
+    const b = el('button', 'move-item');
+    const label = d === '' ? 'Mes fichiers' : d.split('/').join(' / ');
+    b.innerHTML = iconSVG('folder', 'ico') + `<span>${escapeHtml(label)}</span>`;
+    b.onclick = async () => {
+      back.remove();
+      let moved = 0, skipped = 0;
+      for (const item of items) {
+        if (childNamesAt(d).has(item.name)) { skipped++; continue; }
+        try { await rePath(item, d ? d + '/' + item.name : item.name); moved++; }
+        catch { skipped++; }
+      }
+      selected.clear(); await loadAll(); render(); updateMeter();
+      toast(skipped ? `${moved} déplacé(s), ${skipped} ignoré(s) (collision de nom)` : `${moved} fichier(s) déplacé(s)`, skipped ? '' : 'ok');
+    };
+    box.appendChild(b);
+  }
+  const cancel = el('button', 'btn btn-ghost'); cancel.textContent = 'Annuler'; cancel.onclick = () => back.remove();
+  const actions = el('div', 'modal-actions'); actions.appendChild(cancel);
+  m.appendChild(box); m.appendChild(actions); back.appendChild(m);
+  back.onclick = (e) => { if (e.target === back) back.remove(); };
+  document.body.appendChild(back);
 }
 
 // --- déplacement entre dossiers --------------------------------------------
@@ -622,7 +904,12 @@ window.addEventListener('DOMContentLoaded', () => {
     // Révoque la session côté serveur (best-effort) avant d'oublier le token,
     // pour qu'un token éventuellement exfiltré ne reste pas valide 12 h.
     try { if (token) await api('/api/logout', { method: 'POST' }); } catch {}
+    clearTimeout(sessionTimer); sessionTimer = null;
+    if (thumbObserver) { thumbObserver.disconnect(); thumbObserver = null; }
+    for (const url of thumbCache.values()) URL.revokeObjectURL(url);
+    thumbCache.clear();
     identity = null; token = null; masterKey = null; entries = []; cwd = []; query = '';
+    selected.clear(); nav = 'files'; sortBy = 'name'; sortDir = 'asc';
     $('seed').value = ''; $('app').classList.add('hidden'); $('auth').classList.remove('hidden');
   };
 
@@ -640,7 +927,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // navigation latérale
   document.querySelectorAll('[data-view-nav]').forEach(b => b.onclick = () => {
     document.querySelectorAll('[data-view-nav]').forEach(x => x.classList.remove('active'));
-    b.classList.add('active'); nav = b.dataset.viewNav; cwd = []; query=''; $('search').value=''; render();
+    b.classList.add('active'); nav = b.dataset.viewNav; cwd = []; query=''; $('search').value=''; selected.clear(); render();
     closeNav();
   });
 
@@ -649,16 +936,99 @@ window.addEventListener('DOMContentLoaded', () => {
   $('view-list').onclick = () => setView('list');
   $('search').oninput = (e) => { query = e.target.value.trim(); render(); };
 
-  // glisser-déposer
+  // tri (vue « Mes fichiers »)
+  $('sort-by').onchange = (e) => { sortBy = e.target.value; render(); };
+  $('sort-dir').onclick = () => {
+    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    $('sort-dir').classList.toggle('desc', sortDir === 'desc');
+    render();
+  };
+
+  // corbeille
+  $('empty-trash').onclick = emptyTrash;
+
+  // sélection multiple : barre d'actions groupées
+  $('bulk-move').onclick = bulkMoveDialog;
+  $('bulk-trash').onclick = bulkTrash;
+  $('bulk-restore').onclick = bulkRestore;
+  $('bulk-purge').onclick = bulkPurge;
+  $('bulk-clear').onclick = clearSelection;
+
+  // thème (clair/sombre/auto), persistant
+  const THEME_ORDER = ['auto', 'light', 'dark'];
+  const THEME_LABEL = { auto: 'Auto', light: 'Clair', dark: 'Sombre' };
+  function applyTheme(pref) {
+    if (pref === 'auto') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = pref;
+    localStorage.setItem('p2pfs-theme', pref);
+    $('theme-label').textContent = THEME_LABEL[pref];
+  }
+  applyTheme(THEME_ORDER.includes(localStorage.getItem('p2pfs-theme')) ? localStorage.getItem('p2pfs-theme') : 'auto');
+  $('theme-btn').onclick = () => {
+    const cur = localStorage.getItem('p2pfs-theme') || 'auto';
+    applyTheme(THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length]);
+  };
+
+  // raccourcis clavier (uniquement coffre ouvert, hors saisie de texte)
+  document.addEventListener('keydown', (e) => {
+    if ($('app').classList.contains('hidden')) return;
+    const tag = document.activeElement?.tagName;
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable;
+    if (e.key === 'Escape') {
+      if (!$('preview-modal').classList.contains('hidden')) { $('preview-close').click(); return; }
+      if (selected.size) { clearSelection(); return; }
+    }
+    if (typing) return;
+    if (e.key === '/') { e.preventDefault(); $('search').focus(); }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && selected.size) {
+      e.preventDefault();
+      nav === 'trash' ? bulkPurge() : bulkTrash();
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      const { fileList } = currentItems();
+      fileList.forEach(f => selected.add(f.id));
+      render();
+    }
+  });
+
+  // glisser-déposer (fichiers ET dossiers entiers, via webkitGetAsEntry)
   const ov = $('drop-overlay'); let depth = 0;
   const content = document.querySelector('.content');
   content.addEventListener('dragenter', (e) => { e.preventDefault(); if (++depth === 1) ov.classList.remove('hidden'); });
   content.addEventListener('dragover', (e) => e.preventDefault());
   content.addEventListener('dragleave', () => { if (--depth <= 0) { depth=0; ov.classList.add('hidden'); } });
-  content.addEventListener('drop', (e) => {
+  content.addEventListener('drop', async (e) => {
     e.preventDefault(); depth = 0; ov.classList.add('hidden');
-    if (e.dataTransfer.files.length) uploadFiles([...e.dataTransfer.files]);
+    const items = e.dataTransfer.items;
+    const entriesApi = items && [...items].map(it => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+    if (entriesApi && entriesApi.some(en => en.isDirectory)) {
+      const out = [];
+      for (const en of entriesApi) await traverseEntry(en, '', out);
+      if (out.length) uploadFiles(out);
+    } else if (e.dataTransfer.files.length) {
+      uploadFiles([...e.dataTransfer.files]);
+    }
   });
 });
+
+// Traverse récursivement une DataTransferItem (fichier ou dossier déposé) et
+// accumule des { file, fullPath } dans `out`, chemin relatif préservé. Un
+// dossier déposé n'a pas besoin de marqueur explicite : dès qu'un fichier
+// existe sous ce chemin, le dossier apparaît (déduit), comme partout ailleurs.
+async function traverseEntry(entry, basePath, out) {
+  if (entry.isFile) {
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    out.push({ file, fullPath: basePath + entry.name });
+  } else if (entry.isDirectory) {
+    const reader = entry.createReader();
+    // readEntries() ne renvoie qu'un lot (≤100) : il faut le rappeler jusqu'à
+    // un tableau vide pour tout obtenir (particularité de l'API).
+    let batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    while (batch.length) {
+      for (const child of batch) await traverseEntry(child, basePath + entry.name + '/', out);
+      batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    }
+  }
+}
 function setView(v){ view=v; $('view-grid').classList.toggle('active',v==='grid'); $('view-list').classList.toggle('active',v==='list'); render(); }
 function fingerprint(hex){ return hex.slice(0,12).match(/.{1,2}/g).join(':') + '…'; }

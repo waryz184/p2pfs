@@ -64,13 +64,17 @@ type Chunk struct {
 // FileMeta : métadonnées d'un fichier. Champs sensibles (nom, DEK) chiffrés côté
 // navigateur. Le contenu est éclaté en `Chunks` (un seul pour les petits fichiers).
 type FileMeta struct {
-	ID         string    `json:"id"`          // id logique (random, généré client)
-	Owner      string    `json:"owner"`       // pubkey du propriétaire
-	EncName    string    `json:"enc_name"`    // nom/chemin CHIFFRÉ (base64)
-	WrappedKey string    `json:"wrapped_key"` // DEK du fichier, enveloppée par la KEK (base64)
-	Size       int64     `json:"size"`        // taille totale du ciphertext (octets)
-	Chunks     []Chunk   `json:"chunks"`      // manifeste ordonné des morceaux
-	CreatedAt  time.Time `json:"created_at"`
+	ID         string     `json:"id"`          // id logique (random, généré client)
+	Owner      string     `json:"owner"`       // pubkey du propriétaire
+	EncName    string     `json:"enc_name"`    // nom/chemin CHIFFRÉ (base64)
+	WrappedKey string     `json:"wrapped_key"` // DEK du fichier, enveloppée par la KEK (base64)
+	Size       int64      `json:"size"`        // taille totale du ciphertext (octets)
+	Chunks     []Chunk    `json:"chunks"`      // manifeste ordonné des morceaux
+	CreatedAt  time.Time  `json:"created_at"`
+	// DeletedAt : non-nil = dans la corbeille (soft delete). La métadonnée et
+	// ses blobs restent intacts (récupérables via RestoreFile) ; seul Purge
+	// (DeleteFile, endpoint existant) supprime réellement et ramasse les blobs.
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 // Store : l'interface que la prod réimplémentera avec SQLite.
@@ -81,7 +85,13 @@ type Store interface {
 	PutFile(m FileMeta) error
 	ListFiles(owner string) ([]FileMeta, error)
 	GetFile(owner, id string) (FileMeta, error)
+	// DeleteFile supprime RÉELLEMENT (purge) : métadonnée retirée, blobs orphelins
+	// ramassés par l'appelant. Utilisé par la suppression définitive (corbeille).
 	DeleteFile(owner, id string) (FileMeta, error)
+	// TrashFile / RestoreFile : suppression réversible (corbeille). Ne touchent
+	// jamais aux blobs — seule DeleteFile (purge) ramasse.
+	TrashFile(owner, id string) error
+	RestoreFile(owner, id string) error
 	// FileByEncName vérifie les collisions de noms chiffrés (anti-TOCTOU)
 	FileByEncName(owner, encName string) (FileMeta, error)
 
@@ -206,13 +216,45 @@ func (s *jsonStore) PutFile(m FileMeta) error {
 	if s.Files[m.Owner] == nil {
 		s.Files[m.Owner] = map[string]FileMeta{}
 	}
-	// si l'entrée existe déjà (ex. renommage), on conserve sa date de création.
-	if old, ok := s.Files[m.Owner][m.ID]; ok && !old.CreatedAt.IsZero() {
-		m.CreatedAt = old.CreatedAt
+	// si l'entrée existe déjà (ex. renommage), on conserve sa date de création
+	// ET son état de corbeille (seuls TrashFile/RestoreFile le modifient).
+	if old, ok := s.Files[m.Owner][m.ID]; ok {
+		if !old.CreatedAt.IsZero() {
+			m.CreatedAt = old.CreatedAt
+		}
+		m.DeletedAt = old.DeletedAt
 	} else if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now().UTC()
 	}
 	s.Files[m.Owner][m.ID] = m
+	return s.flush()
+}
+
+// TrashFile marque un fichier comme supprimé (soft delete) : métadonnée et
+// blobs restent intacts, récupérables via RestoreFile.
+func (s *jsonStore) TrashFile(owner, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.Files[owner][id]
+	if !ok {
+		return ErrNotFound
+	}
+	now := time.Now().UTC()
+	m.DeletedAt = &now
+	s.Files[owner][id] = m
+	return s.flush()
+}
+
+// RestoreFile annule une mise à la corbeille.
+func (s *jsonStore) RestoreFile(owner, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.Files[owner][id]
+	if !ok {
+		return ErrNotFound
+	}
+	m.DeletedAt = nil
+	s.Files[owner][id] = m
 	return s.flush()
 }
 

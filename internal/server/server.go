@@ -70,6 +70,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/files", s.authed(s.handleListFiles))
 	mux.HandleFunc("POST /api/files", s.authed(s.handlePutFile))
+	mux.HandleFunc("POST /api/files/{id}/trash", s.authed(s.handleTrashFile))
+	mux.HandleFunc("POST /api/files/{id}/restore", s.authed(s.handleRestoreFile))
 	mux.HandleFunc("DELETE /api/files/{id}", s.authed(s.handleDeleteFile))
 	mux.HandleFunc("PUT /api/blob/{id}", s.authed(s.handlePutBlob))
 	mux.HandleFunc("GET /api/blob/{id}", s.authed(s.handleGetBlob))
@@ -145,7 +147,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		"default-src 'none'",
 		"script-src 'self'",
 		"style-src 'self'",
-		"img-src 'self' data:",
+		// blob: : miniatures d'images et aperçu (image/PDF) déchiffrés côté client
+		// (URL.createObjectURL). Toujours même origine et généré par NOTRE JS à
+		// partir de données déjà déchiffrées ; un serveur/tiers ne peut pas en
+		// injecter — aucun affaiblissement du modèle de menace (F7).
+		"img-src 'self' data: blob:",
+		"object-src 'self' blob:", // <embed type=application/pdf> de l'aperçu PDF
 		"connect-src 'self'",
 		"font-src 'self'",
 		"base-uri 'none'",
@@ -443,6 +450,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request, owner str
 	}
 
 	m.CreatedAt = time.Time{} // le store fixe/conserve la date
+	m.DeletedAt = nil         // idem pour l'état de corbeille : seuls /trash et /restore le changent
 	if err := s.store.PutFile(m); err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
@@ -450,6 +458,34 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request, owner str
 	writeJSON(w, http.StatusOK, map[string]string{"id": m.ID})
 }
 
+// handleTrashFile déplace un fichier vers la corbeille (soft delete, F3
+// n'agit pas : aucun blob n'est touché, donc rien à ramasser ici).
+func (s *Server) handleTrashFile(w http.ResponseWriter, r *http.Request, owner string) {
+	id, ok := pathID(w, r, reID)
+	if !ok {
+		return
+	}
+	if err := s.store.TrashFile(owner, id); err != nil {
+		httpError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRestoreFile annule une mise à la corbeille.
+func (s *Server) handleRestoreFile(w http.ResponseWriter, r *http.Request, owner string) {
+	id, ok := pathID(w, r, reID)
+	if !ok {
+		return
+	}
+	if err := s.store.RestoreFile(owner, id); err != nil {
+		httpError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteFile supprime RÉELLEMENT (purge définitive, corbeille ou non).
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request, owner string) {
 	id, ok := pathID(w, r, reID)
 	if !ok {

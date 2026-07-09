@@ -69,6 +69,10 @@
         <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
         Récents
       </button>
+      <button class="nav-item" data-view-nav="trash">
+        <svg viewBox="0 0 24 24" class="ic"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+        Corbeille
+      </button>
     </nav>
 
     <div class="side-bottom">
@@ -87,6 +91,10 @@
       <button id="enroll-key" class="btn btn-ghost lock-btn hidden">
         <svg viewBox="0 0 24 24" class="ic"><circle cx="8" cy="15" r="5"/><path d="M11.5 11.5 21 2M18 5l2 2M15 8l2 2"/></svg>
         Ajouter une clé de sécurité
+      </button>
+      <button id="theme-btn" class="btn btn-ghost lock-btn" title="Changer de thème">
+        <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        Thème : <span id="theme-label">Auto</span>
       </button>
       <button id="lock" class="btn btn-ghost lock-btn">
         <svg viewBox="0 0 24 24" class="ic"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
@@ -107,18 +115,32 @@
           <svg viewBox="0 0 24 24" class="ic"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
           <input id="search" type="search" placeholder="Rechercher dans le coffre" autocomplete="off">
         </div>
+        <div id="sort-tools" class="sort-tools">
+          <select id="sort-by" title="Trier par">
+            <option value="name">Nom</option>
+            <option value="size">Taille</option>
+            <option value="date">Date</option>
+          </select>
+          <button id="sort-dir" class="icon-btn" title="Inverser l'ordre">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+          </button>
+        </div>
         <div class="view-toggle">
           <button id="view-grid" class="vt active" title="Grille"><svg viewBox="0 0 24 24" class="ic"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg></button>
           <button id="view-list" class="vt" title="Liste"><svg viewBox="0 0 24 24" class="ic"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></svg></button>
         </div>
       </div>
     </header>
+    <div id="trash-bar" class="trash-bar hidden">
+      <span>Les éléments de la corbeille restent chiffrés et peuvent être restaurés.</span>
+      <button id="empty-trash" class="btn btn-ghost">Vider la corbeille</button>
+    </div>
 
     <section id="canvas" class="canvas">
       <div id="empty" class="empty hidden"></div>
       <div id="grid" class="grid"></div>
       <table id="list" class="list hidden">
-        <thead><tr><th class="c-name">Nom</th><th class="c-size">Taille</th><th class="c-date">Ajouté</th><th class="c-act"></th></tr></thead>
+        <thead><tr><th class="c-sel"></th><th class="c-name">Nom</th><th class="c-size">Taille</th><th class="c-date">Ajouté</th><th class="c-act"></th></tr></thead>
         <tbody id="list-body"></tbody>
       </table>
     </section>
@@ -158,6 +180,28 @@
     <div class="modal-actions">
       <button id="key-later" class="btn btn-ghost">Plus tard</button>
       <button id="key-now" class="btn btn-primary">Ajouter une clé maintenant</button>
+    </div>
+  </div>
+</div>
+
+<!-- Barre d'actions groupées (sélection multiple) -->
+<div id="bulk-bar" class="bulk-bar hidden">
+  <span id="bulk-count"></span>
+  <button id="bulk-move" class="btn btn-ghost">Déplacer</button>
+  <button id="bulk-trash" class="btn btn-ghost">Corbeille</button>
+  <button id="bulk-restore" class="btn btn-ghost hidden">Restaurer</button>
+  <button id="bulk-purge" class="btn btn-ghost hidden">Supprimer définitivement</button>
+  <button id="bulk-clear" class="btn btn-ghost">Désélectionner</button>
+</div>
+
+<!-- Modale d'aperçu (image / PDF / texte) -->
+<div id="preview-modal" class="modal-back hidden">
+  <div class="modal preview-modal">
+    <h3 id="preview-title"></h3>
+    <div id="preview-body" class="preview-body"></div>
+    <div class="modal-actions">
+      <button id="preview-close" class="btn btn-ghost">Fermer</button>
+      <button id="preview-dl" class="btn btn-primary">Télécharger</button>
     </div>
   </div>
 </div>
