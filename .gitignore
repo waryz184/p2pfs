@@ -1,6 +1,6 @@
-# Binaire compilé
-p2pfs
-vaultd
+# Binaire compilé (anchoré à la racine : ne doit PAS matcher cmd/p2pfs/)
+/p2pfs
+/vaultd
 
 # Données runtime (coffres chiffrés locaux — jamais dans le repo)
 vaultdata/
@@ -11,3 +11,6 @@ vaultdata/
 
 # macOS
 .DS_Store
+
+# Docker Compose (contient le domaine, pas un secret mais pas à committer)
+.env

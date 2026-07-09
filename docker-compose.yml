@@ -1,0 +1,58 @@
+# =============================================================================
+# docker-compose.yml — p2pfs (loopback interne au réseau Docker) + Caddy
+# (TLS auto Let's Encrypt, seule porte publique).
+#
+#   cp .env.example .env   # puis renseigner DOMAIN
+#   docker compose up -d --build
+#
+# p2pfs n'est PAS publié sur l'hôte (pas de "ports:") : seul Caddy l'est, sur
+# 80/443. Caddy atteint p2pfs via le réseau Docker interne (nom de service).
+# Le conteneur Caddy a une IP statique sur ce réseau ; p2pfs ne fait confiance
+# qu'à cette IP pour X-Forwarded-For (-trusted-proxies), voir Dockerfile (F2).
+# =============================================================================
+
+services:
+  p2pfs:
+    build: .
+    container_name: p2pfs
+    restart: unless-stopped
+    # Complète l'ENTRYPOINT du Dockerfile (-addr 0.0.0.0:8000 -data /data) :
+    # seul le proxy Caddy (IP statique ci-dessous) est autorisé à poser X-Forwarded-For.
+    command: ["-trusted-proxies", "172.28.0.10/32"]
+    volumes:
+      - p2pfs_data:/data
+    networks:
+      p2pfs_net: {}
+    # Pas de HEALTHCHECK : l'image "scratch" n'a ni shell ni curl/wget pour en
+    # écrire un. Caddy en amont sert déjà de sonde de bout en bout.
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: p2pfs-caddy
+    restart: unless-stopped
+    depends_on:
+      - p2pfs
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile.docker:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      p2pfs_net:
+        ipv4_address: 172.28.0.10
+
+networks:
+  p2pfs_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  p2pfs_data:
+  caddy_data:
+  caddy_config:

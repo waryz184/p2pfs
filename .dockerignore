@@ -1,0 +1,8 @@
+.git
+.env
+*.md
+/deploy
+/tests
+/e2e*.test.mjs
+/p2pfs
+/p2pfsdata

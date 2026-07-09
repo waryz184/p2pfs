@@ -15,10 +15,15 @@ WORKDIR /src
 COPY go.mod ./
 COPY . .
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -ldflags "-s -w" -o /p2pfs ./cmd/p2pfs
+# /data pré-créé et possédé par l'UID non-root ci-dessous : "scratch" n'a pas
+# de mkdir/chown, et un volume monté sur un chemin absent de l'image serait
+# initialisé root:root par Docker, illisible pour USER 10001:10001.
+RUN mkdir -p /data && chown 10001:10001 /data
 
 # ---- runtime ----
 FROM scratch
 COPY --from=build /p2pfs /p2pfs
+COPY --from=build --chown=10001:10001 /data /data
 # p2pfs écoute en clair sur 8000 ; data dans /data (volume).
 ENV P2PFS_DATA=/data
 EXPOSE 8000

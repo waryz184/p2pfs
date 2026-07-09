@@ -1,0 +1,48 @@
+# =============================================================================
+# Caddyfile.docker — terminaison TLS (Let's Encrypt auto) devant p2pfs, pour le
+# déploiement via docker-compose (voir docker-compose.yml à la racine).
+#
+# Différences avec deploy/Caddyfile (déploiement systemd bare-metal) :
+#   - le domaine vient de la variable d'env DOMAIN (fichier .env)
+#   - p2pfs est joint par nom de service Docker (p2pfs:8000), pas 127.0.0.1
+#   - logs sur stdout (récupérables via `docker compose logs caddy`)
+# =============================================================================
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# p2pfs pose déjà CSP/HSTS, mais on renforce ici au cas où.
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Limite la taille des corps de requête (défense en profondeur ; p2pfs
+	# limite déjà les blobs à 64 MiB côté applicatif).
+	request_body {
+		max_size 80MB
+	}
+
+	# Caddy POSE X-Forwarded-For = IP réelle du client (remplace tout en-tête
+	# entrant). p2pfs ne croit cet en-tête que s'il vient d'un -trusted-proxies
+	# explicitement déclaré (l'IP statique de ce conteneur Caddy sur le réseau
+	# Docker interne — voir docker-compose.yml) : un attaquant frappant p2pfs
+	# en direct (il n'est pas publié sur l'hôte) ne peut de toute façon pas
+	# l'atteindre, mais on garde F2 en profondeur.
+	reverse_proxy p2pfs:8000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Rate-limiting natif : nécessite le module caddy-ratelimit (image Caddy
+# custom via xcaddy). Sinon, le rate-limit applicatif de p2pfs (par IP, sur
+# /challenge + /login) suffit pour un POC.

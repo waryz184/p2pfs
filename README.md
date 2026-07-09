@@ -184,6 +184,17 @@ docker run -d --name vault --restart=unless-stopped \
 # Caddy (sur l'hôte) reverse-proxy 127.0.0.1:8000 et gère le TLS.
 ```
 
+### Option C — Docker Compose (p2pfs + Caddy conteneurisés)
+```bash
+cp .env.example .env        # renseigner DOMAIN=vault.tondomaine.fr (jamais une IP)
+docker compose up -d --build
+```
+`docker-compose.yml` lance deux services sur un réseau Docker dédié : `p2pfs` (non
+publié sur l'hôte) et `caddy` (seul à publier 80/443, TLS auto Let's Encrypt via
+`deploy/Caddyfile.docker`). Le conteneur Caddy a une IP statique sur ce réseau ; p2pfs
+ne fait confiance qu'à cette IP pour `X-Forwarded-For` (F2). Les données persistent
+dans le volume nommé `p2pfs_data`.
+
 ---
 
 ## 6 bis. Déverrouillage par clé matérielle (WebAuthn/PRF)
