@@ -2,11 +2,13 @@
 # docker-compose.yml — p2pfs (loopback interne au réseau Docker) + Caddy
 # (TLS auto Let's Encrypt, seule porte publique).
 #
-#   cp .env.example .env   # puis renseigner DOMAIN
+#   cp .env.example .env   # renseigner DOMAIN, éventuellement P2PFS_PORT
 #   docker compose up -d --build
 #
 # p2pfs n'est PAS publié sur l'hôte (pas de "ports:") : seul Caddy l'est, sur
-# 80/443. Caddy atteint p2pfs via le réseau Docker interne (nom de service).
+# 80/443. Caddy atteint p2pfs via le réseau Docker interne (nom de service),
+# sur le port P2PFS_PORT (défaut 8000, cf. .env.example) — Caddyfile.docker
+# lit la même variable pour cibler le bon port côté reverse_proxy.
 # Le conteneur Caddy a une IP statique sur ce réseau ; p2pfs ne fait confiance
 # qu'à cette IP pour X-Forwarded-For (-trusted-proxies), voir Dockerfile (F2).
 # =============================================================================
@@ -16,9 +18,10 @@ services:
     build: .
     container_name: p2pfs
     restart: unless-stopped
-    # Complète l'ENTRYPOINT du Dockerfile (-addr 0.0.0.0:8000 -data /data) :
-    # seul le proxy Caddy (IP statique ci-dessous) est autorisé à poser X-Forwarded-For.
-    command: ["-trusted-proxies", "172.28.0.10/32"]
+    # Remplace le -addr 0.0.0.0:8000 fixé par l'ENTRYPOINT du Dockerfile (le
+    # dernier -addr l'emporte) et complète -trusted-proxies : seul le proxy
+    # Caddy (IP statique ci-dessous) est autorisé à poser X-Forwarded-For.
+    command: ["-addr", "0.0.0.0:${P2PFS_PORT:-8000}", "-trusted-proxies", "172.28.0.10/32"]
     volumes:
       - p2pfs_data:/data
     networks:

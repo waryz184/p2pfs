@@ -4,18 +4,21 @@
 # TLS avec son certificat *.ts.net et fait office de reverse-proxy.
 #
 #   docker compose -f docker-compose.tailscale.yml up -d --build
+#   # port personnalisable : P2PFS_PORT=9000 docker compose -f ... up -d --build
+#   # (ou via un fichier .env à côté de ce compose, cf. .env.example)
 #
 #   # une fois : sur l'hôte (SSH), pas dans un conteneur.
 #   # nécessite MagicDNS + "HTTPS Certificates" activés sur le tailnet
 #   # (https://login.tailscale.com/admin/dns).
-#   sudo tailscale serve https / http://127.0.0.1:8000
+#   sudo tailscale serve https / http://127.0.0.1:${P2PFS_PORT:-8000}
 #   tailscale serve status   # vérifie ; l'URL affichée est ton vault
 #
-# p2pfs n'est publié que sur la loopback de l'hôte (127.0.0.1:8000), jamais
-# sur 0.0.0.0 : seul tailscale (sur l'hôte) peut l'atteindre. Le trafic
-# host->conteneur via le port publié Docker apparaît côté conteneur comme
-# venant de la gateway du réseau bridge (ici 172.29.0.1, fixée ci-dessous) :
-# c'est la seule IP déclarée en -trusted-proxies (F2, fail-closed sinon).
+# p2pfs n'est publié que sur la loopback de l'hôte (127.0.0.1:$P2PFS_PORT,
+# défaut 8000), jamais sur 0.0.0.0 : seul tailscale (sur l'hôte) peut
+# l'atteindre. Le trafic host->conteneur via le port publié Docker apparaît
+# côté conteneur comme venant de la gateway du réseau bridge (ici 172.29.0.1,
+# fixée ci-dessous) : c'est la seule IP déclarée en -trusted-proxies (F2,
+# fail-closed sinon).
 # =============================================================================
 
 services:
@@ -23,9 +26,11 @@ services:
     build: .
     container_name: p2pfs
     restart: unless-stopped
-    command: ["-trusted-proxies", "172.29.0.1/32"]
+    # Remplace le -addr 0.0.0.0:8000 fixé par l'ENTRYPOINT du Dockerfile (le
+    # dernier -addr l'emporte).
+    command: ["-addr", "0.0.0.0:${P2PFS_PORT:-8000}", "-trusted-proxies", "172.29.0.1/32"]
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${P2PFS_PORT:-8000}:${P2PFS_PORT:-8000}"
     volumes:
       - p2pfs_data:/data
     networks:

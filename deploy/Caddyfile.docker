@@ -4,7 +4,7 @@
 #
 # Différences avec deploy/Caddyfile (déploiement systemd bare-metal) :
 #   - le domaine vient de la variable d'env DOMAIN (fichier .env)
-#   - p2pfs est joint par nom de service Docker (p2pfs:8000), pas 127.0.0.1
+#   - p2pfs est joint par nom de service Docker (p2pfs:$P2PFS_PORT), pas 127.0.0.1
 #   - logs sur stdout (récupérables via `docker compose logs caddy`)
 # =============================================================================
 
@@ -32,7 +32,7 @@
 	# Docker interne — voir docker-compose.yml) : un attaquant frappant p2pfs
 	# en direct (il n'est pas publié sur l'hôte) ne peut de toute façon pas
 	# l'atteindre, mais on garde F2 en profondeur.
-	reverse_proxy p2pfs:8000 {
+	reverse_proxy p2pfs:{$P2PFS_PORT:8000} {
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-For {remote_host}
 	}

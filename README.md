@@ -193,21 +193,24 @@ docker compose up -d --build
 publié sur l'hôte) et `caddy` (seul à publier 80/443, TLS auto Let's Encrypt via
 `deploy/Caddyfile.docker`). Le conteneur Caddy a une IP statique sur ce réseau ; p2pfs
 ne fait confiance qu'à cette IP pour `X-Forwarded-For` (F2). Les données persistent
-dans le volume nommé `p2pfs_data`.
+dans le volume nommé `p2pfs_data`. Le port d'écoute interne de p2pfs (`P2PFS_PORT`
+dans `.env`, défaut `8000`) est une variable — inutile d'y toucher sauf conflit
+avec un autre service sur le même réseau Docker.
 
 ### Option D — Docker Compose + Tailscale (aucune exposition publique)
 Si le serveur tourne déjà `tailscale` (hôte) et que le coffre n'a besoin d'être
 accessible que depuis tes propres appareils, pas besoin de Caddy/Let's Encrypt :
 Tailscale fournit déjà du TLS valide via son certificat `*.ts.net`.
 ```bash
+cp .env.example .env        # optionnel : ajuster P2PFS_PORT si 8000 est déjà pris
 docker compose -f docker-compose.tailscale.yml up -d --build
 
 # une fois, sur l'hôte (pas dans un conteneur) — nécessite MagicDNS + "HTTPS
 # Certificates" activés sur le tailnet (login.tailscale.com/admin/dns) :
-sudo tailscale serve https / http://127.0.0.1:8000
+sudo tailscale serve https / http://127.0.0.1:${P2PFS_PORT:-8000}
 tailscale serve status   # affiche l'URL du vault, ex. https://monserveur.tailxxxx.ts.net
 ```
-Aucun port n'est publié sur l'hôte à part `127.0.0.1:8000` (loopback, inatteignable
+Aucun port n'est publié sur l'hôte à part `127.0.0.1:$P2PFS_PORT` (loopback, inatteignable
 depuis l'extérieur) ; `tailscale serve` s'en charge et persiste après reboot. La
 config `tailscale serve` est à faire une seule fois, hors Portainer (c'est une
 commande hôte, pas un conteneur).
