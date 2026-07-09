@@ -88,6 +88,14 @@ func (a *Auth) NewChallenge(pubkey string) ([]byte, error) {
 	return n, nil
 }
 
+// authMessage construit le message effectivement signé par le client :
+// préfixe de contexte + OCTETS BRUTS du nonce (pas sa forme hex), pour éviter
+// le rejeu inter-protocole. DOIT matcher exactement web/crypto.js:authMessage
+// — source unique ici pour que Verify() et les tests ne divergent jamais.
+func authMessage(nonce []byte) []byte {
+	return append([]byte("p2pfs-auth-v1:"), nonce...)
+}
+
 // Verify valide une signature contre le challenge en cours. Si OK, le challenge
 // est consommé (usage unique) et un token de session est émis.
 func (a *Auth) Verify(pubkeyHex string, nonce, sig []byte) (string, bool) {
@@ -106,9 +114,7 @@ func (a *Auth) Verify(pubkeyHex string, nonce, sig []byte) (string, bool) {
 	if subtle.ConstantTimeCompare(c.nonce, nonce) != 1 {
 		return "", false
 	}
-	// Contextualiser la signature pour éviter le rejeu inter-protocole
-	msg := append([]byte("p2pfs-auth-v1:"), nonce...)
-	if !ed25519.Verify(ed25519.PublicKey(pub), msg, sig) {
+	if !ed25519.Verify(ed25519.PublicKey(pub), authMessage(nonce), sig) {
 		return "", false
 	}
 

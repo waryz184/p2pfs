@@ -18,7 +18,7 @@ const id3 = await C.deriveIdentity(C.newMnemonic(128));
 const ch = await j(await fetch(base + '/api/challenge', {
   method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ pubkey: id3.pubHex }) }));
-const sig = id3.sign(C.fromHex(ch.nonce));
+const sig = id3.sign(C.authMessage(ch.nonce));
 const login = await j(await fetch(base + '/api/login', {
   method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ pubkey: id3.pubHex, nonce: ch.nonce, sig: C.toHex(sig) }) }));

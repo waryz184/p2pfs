@@ -16,7 +16,7 @@ const eq = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 const id3 = await C.deriveIdentityFromMaster(C.masterFromMnemonic(C.newMnemonic(128)));
 const ch = await J(await fetch(base + '/api/challenge', { method: 'POST',
   headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pubkey: id3.pubHex }) }));
-const sig = id3.sign(C.fromHex(ch.nonce));
+const sig = id3.sign(C.authMessage(ch.nonce));
 const token = (await J(await fetch(base + '/api/login', { method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ pubkey: id3.pubHex, nonce: ch.nonce, sig: C.toHex(sig) }) }))).token;

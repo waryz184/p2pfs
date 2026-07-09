@@ -61,8 +61,7 @@ func loginTest(t *testing.T, ts *httptest.Server) (token, pubHex string) {
 	ch := postJSON(t, ts, "/api/challenge", map[string]string{"pubkey": pubHex})
 	nonceHex, _ := ch["nonce"].(string)
 	nonce, _ := hex.DecodeString(nonceHex)
-	msg := append([]byte("p2pfs-auth-v1:"), nonce...)
-	sig := ed25519.Sign(priv, msg)
+	sig := ed25519.Sign(priv, authMessage(nonce))
 	res := postJSON(t, ts, "/api/login", map[string]string{
 		"pubkey": pubHex, "nonce": nonceHex, "sig": hex.EncodeToString(sig),
 	})

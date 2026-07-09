@@ -14,7 +14,7 @@ const J = (r) => r.json();
 async function login(id3) {
   const ch = await J(await fetch(base + '/api/challenge', { method: 'POST',
     headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pubkey: id3.pubHex }) }));
-  const sig = id3.sign(C.fromHex(ch.nonce));
+  const sig = id3.sign(C.authMessage(ch.nonce));
   const r = await J(await fetch(base + '/api/login', { method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ pubkey: id3.pubHex, nonce: ch.nonce, sig: C.toHex(sig) }) }));

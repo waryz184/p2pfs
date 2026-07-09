@@ -38,6 +38,11 @@ export const unb64 = (s) => new Uint8Array(atob(s).split('').map(c => c.charCode
 export const b64url = (u8) => b64(u8).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 export const unb64url = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return unb64(s); };
 
+// Message signé au login (challenge-réponse). DOIT matcher exactement
+// internal/server/auth.go : préfixe + OCTETS BRUTS du nonce (pas sa forme
+// hex) — source unique pour éviter que ça diverge côté client à nouveau.
+export const authMessage = (nonceHex) => ed25519.etc.concatBytes(enc.encode('p2pfs-auth-v1:'), fromHex(nonceHex));
+
 // --- seed phrase ------------------------------------------------------------
 export function newMnemonic(strength = 256) {        // 256 bits = 24 mots (sécurité renforcée)
   return bip39.generateMnemonic(wordlistEN, strength);
