@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -60,7 +61,8 @@ func loginTest(t *testing.T, ts *httptest.Server) (token, pubHex string) {
 	ch := postJSON(t, ts, "/api/challenge", map[string]string{"pubkey": pubHex})
 	nonceHex, _ := ch["nonce"].(string)
 	nonce, _ := hex.DecodeString(nonceHex)
-	sig := ed25519.Sign(priv, nonce)
+	msg := append([]byte("p2pfs-auth-v1:"), nonce...)
+	sig := ed25519.Sign(priv, msg)
 	res := postJSON(t, ts, "/api/login", map[string]string{
 		"pubkey": pubHex, "nonce": nonceHex, "sig": hex.EncodeToString(sig),
 	})
@@ -104,9 +106,12 @@ func putBlobResp(t *testing.T, ts *httptest.Server, token string, data []byte) (
 // putFileResp dépose une métadonnée de fichier (un seul chunk) et renvoie le statut.
 func putFileResp(t *testing.T, ts *httptest.Server, token, id, blobID string, size int64) int {
 	t.Helper()
+	// enc_name dérivé de id : unique par fichier logique (sinon la vérification
+	// anti-collision de handlePutFile rejette le 2e appel avec un même nom).
+	encName := base64.StdEncoding.EncodeToString([]byte("enc-name-" + id))
 	body, _ := json.Marshal(map[string]any{
 		"id":          id,
-		"enc_name":    "ZW5jcnlwdGVkLW5hbWU=",
+		"enc_name":    encName,
 		"wrapped_key": "d3JhcHBlZC1rZXk=",
 		"size":        size,
 		"chunks":      []map[string]any{{"blob_id": blobID, "iv": "aXYxMjM0NTY3OA==", "size": size}},

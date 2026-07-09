@@ -45,8 +45,14 @@ async function api(path, { method = 'GET', json, raw } = {}) {
 async function loginWithIdentity(id3) {
   identity = id3;
   const { nonce } = await api('/api/challenge', { method: 'POST', json: { pubkey: identity.pubHex } });
-  // Contextualiser la signature pour éviter le rejeu inter-protocole
-  const msg = enc.encode('p2pfs-auth-v1:' + nonce);
+  // Contextualiser la signature pour éviter le rejeu inter-protocole. Le
+  // serveur vérifie contre prefix + OCTETS BRUTS du nonce (pas sa forme hex) :
+  // il faut décoder ici avant de concaténer, sinon la signature ne matche jamais.
+  const prefix = enc.encode('p2pfs-auth-v1:');
+  const nonceBytes = C.fromHex(nonce);
+  const msg = new Uint8Array(prefix.length + nonceBytes.length);
+  msg.set(prefix, 0);
+  msg.set(nonceBytes, prefix.length);
   const sig = identity.sign(msg);
   const res = await api('/api/login', { method: 'POST',
     json: { pubkey: identity.pubHex, nonce, sig: C.toHex(sig) } });

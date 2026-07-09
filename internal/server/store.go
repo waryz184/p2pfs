@@ -183,16 +183,6 @@ func (s *jsonStore) flush() error {
 	return fsyncDir(filepath.Dir(s.path)) // le rename lui-même devient durable
 }
 
-// fsyncDir force l'écriture de l'entrée de répertoire (rendue durable le rename).
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
 func (s *jsonStore) UpsertAccount(pubkey string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
